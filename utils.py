@@ -17,11 +17,14 @@ def clip_classifier(classnames, template, clip_model):
         for classname in classnames:
             # Tokenize the prompts
             classname = classname.replace('_', ' ')
-            texts = [t.format(classname) for t in template]
-            texts = clip.tokenize(texts).cuda()
-            class_embeddings = clip_model.encode_text(texts)
+            # Use single template (first entry) for zero-shot classifier
+            text = template[0].format(classname)
+            texts = clip.tokenize([text]).cuda()
+            # Handle DataParallel wrapper
+            model = clip_model.module if hasattr(clip_model, 'module') else clip_model
+            class_embeddings = model.encode_text(texts)
             class_embeddings /= class_embeddings.norm(dim=-1, keepdim=True)
-            class_embedding = class_embeddings.mean(dim=0)
+            class_embedding = class_embeddings[0]
             class_embedding /= class_embedding.norm()
             clip_weights.append(class_embedding)
         clip_weights = torch.stack(clip_weights, dim=1).cuda()
@@ -34,11 +37,15 @@ def pre_load_features(clip_model, loader):
     with torch.no_grad():
         for i, (images, target) in enumerate(tqdm(loader)):
             images, target = images.cuda(), target.cuda()
-            image_features = clip_model.encode_image(images)
+            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                image_features = clip_model.encode_image(images)
             image_features /= image_features.norm(dim=-1, keepdim=True)
             features.append(image_features.cpu())
             labels.append(target.cpu())
         features, labels = torch.cat(features), torch.cat(labels)
     
     return features, labels
+
+def unwrap(model):
+    return model.module if isinstance(model, torch.nn.DataParallel) else model
 

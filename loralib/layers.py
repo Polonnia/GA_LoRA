@@ -342,7 +342,7 @@ class PlainMultiheadAttentionLoRA(nn.Module):
             self,
             existing_mha: nn.MultiheadAttention,
             enable_lora: list = ['q', 'k', 'v', 'o'],
-            r: int = 0, 
+            r: int = 2, 
             lora_alpha: int = 1, 
             dropout_rate:float = 0.,
             **kwargs
