@@ -64,7 +64,10 @@ class LoRALayer():
         for param_name, lora_name in self.params_with_lora.items():
             if hasattr(self, f'{lora_name}_lora_A'):
                 # initialize A the same way as the default for nn.Linear and B to zero
-                nn.init.kaiming_uniform_(eval(f'self.{lora_name}_lora_A'), a=math.sqrt(5))
+                a = eval(f'self.{lora_name}_lora_A')
+                n = a.size(1)
+                std_dev = math.sqrt(1 / n) # n^-1/2
+                nn.init.normal_(eval(f'self.{lora_name}_lora_A'), mean=0, std=std_dev)
                 nn.init.zeros_(eval(f'self.{lora_name}_lora_B'))
 
     def transpose(self, w: torch.Tensor):
@@ -132,8 +135,11 @@ class Embedding(nn.Embedding, LoRALayer):
     def init_lora_param(self):
         if hasattr(self, 'w_lora_A'):
             # initialize A the same way as the default for nn.Linear and B to zero
-            nn.init.zeros_(self.w_lora_A)
-            nn.init.normal_(self.w_lora_B)
+            a = eval(f'self.w_lora_A')
+            nn.init.zeros_(self.w_lora_B)
+            n = a.size(1)
+            std_dev = math.sqrt(1 / n)
+            nn.init.normal_(self.w_lora_A, std=std_dev)
 
     def train(self, mode: bool = True):
         nn.Embedding.train(self, mode)
@@ -184,24 +190,33 @@ class LinearLoRA(nn.Linear, LoRALayer):
 
         
     def forward(self, x: torch.Tensor, **kwargs):
-        
-        if self.dropout is None: # do as before
-            if self.r > 0 and not self.merged:
-                self.merge_lora_param()
-                result = nn.Linear.forward(self, x, **kwargs)
-                self.sub_lora_data()
-                return result
-            else:
-                return nn.Linear.forward(self, x, **kwargs)
-            
-        # Compute the original linear transformation
-        original_output = nn.Linear.forward(self, x)
+        # Ensure weights/bias are in the same dtype as input to avoid dtype mismatches
+        # (happens under torch.cuda.amp.autocast where input may be half)
+        weight = self.weight.to(x.dtype)
+        bias = self.bias.to(x.dtype) if self.bias is not None else None
 
-        if self.training and self.dropout.p > 0:
-            x = self.dropout(x)
-        
+        if self.dropout is None:  # simple path
+            if self.r > 0 and not self.merged:
+                # merge temporarily to compute output in correct dtype
+                self.merge_lora_param()
+                out = F.linear(x, weight, bias)
+                self.sub_lora_data()
+                return out
+            else:
+                return F.linear(x, weight, bias)
+
+        # Compute the original linear transformation (with weights cast)
+        original_output = F.linear(x, weight, bias)
+
+        if self.training and getattr(self, 'dropout', None) is not None and self.dropout.p > 0:
+            x_dropped = self.dropout(x)
+        else:
+            x_dropped = x
+
         if self.r > 0 and not self.merged:
-            lora_adjustment = torch.matmul(x,self.merge_BA('weight').transpose(0, 1)) * self.scaling 
+            # ensure LoRA delta is same dtype as input
+            delta_w = self.merge_BA('weight').transpose(0, 1).to(x.dtype)
+            lora_adjustment = torch.matmul(x_dropped, delta_w) * self.scaling
             result = original_output + lora_adjustment
         else:
             result = original_output
@@ -421,7 +436,23 @@ class PlainMultiheadAttentionLoRA(nn.Module):
                                          lora_alpha=lora_alpha,
                                          fan_in_fan_out=False,
                                          dropout_rate = dropout_rate)
-        
+        # record which projections have LoRA enabled for downstream inspection
+        # store as both a module attribute and on the projection modules so external
+        # code (Chromosome.collect) can detect enabled projections via getattr(..., 'enable_lora')
+        self.enable_lora = list(enable_lora)
+        try:
+            # attach to projection modules if they exist
+            if hasattr(self, 'q_proj'):
+                setattr(self.q_proj, 'enable_lora', list(enable_lora))
+            if hasattr(self, 'k_proj'):
+                setattr(self.k_proj, 'enable_lora', list(enable_lora))
+            if hasattr(self, 'v_proj'):
+                setattr(self.v_proj, 'enable_lora', list(enable_lora))
+            if hasattr(self, 'proj'):
+                setattr(self.proj, 'enable_lora', list(enable_lora))
+        except Exception:
+            # be permissive in attaching this metadata
+            pass
     def forward_module(
             self,
             query,
@@ -463,9 +494,19 @@ class PlainMultiheadAttentionLoRA(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]
         """
         
-        q = self.q_proj(query)
-        k = self.k_proj(key)
-        v = self.v_proj(value)
+        # helper: if module is our LinearLoRA, call it; otherwise perform linear with weights cast to input dtype
+        def _call_linear(mod, inp: torch.Tensor):
+            # LinearLoRA handles dtype itself
+            if isinstance(mod, LinearLoRA):
+                return mod(inp)
+            # plain nn.Linear: cast weights/bias to input dtype to avoid autocast dtype mismatch
+            w = mod.weight.to(inp.dtype)
+            b = mod.bias.to(inp.dtype) if getattr(mod, 'bias', None) is not None else None
+            return F.linear(inp, w, b)
+
+        q = _call_linear(self.q_proj, query)
+        k = _call_linear(self.k_proj, key)
+        v = _call_linear(self.v_proj, value)
 
         attn_mask = F._canonical_mask(
             mask=attn_mask,
@@ -510,11 +551,12 @@ class PlainMultiheadAttentionLoRA(nn.Module):
 
         attn_output = self.scaled_dot_product_attention(q, k, v, attn_mask, dropout_p, is_causal)
         attn_output = attn_output.permute(2, 0, 1, 3).contiguous().view(bsz * tgt_len, embed_dim)
-        attn_output = self.proj(attn_output)
+        # proj may be LinearLoRA or plain nn.Linear; ensure dtype match
+        attn_output = _call_linear(self.proj, attn_output)
         attn_output = attn_output.view(tgt_len, bsz, attn_output.size(1))
         if self.batch_first and is_batched:
             return attn_output.transpose(1, 0), None
-        return attn_output, None  
+        return attn_output, None
 
     def train(self, mode: bool = True):
         super().train(mode)

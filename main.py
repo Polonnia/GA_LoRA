@@ -7,13 +7,15 @@ from datasets.utils import build_data_loader
 
 from utils import *
 from run_utils import *
-from lora import run_lora
+from lora_adam import run_lora_adam
+from ga import run_lora_ga
 
 
 def main():
 
     # Load config file
     args = get_arguments()
+    print(args)
     
     set_random_seed(args.seed)
     
@@ -22,7 +24,7 @@ def main():
     clip_model.eval()
     logit_scale = 100
 
-    shots_list = [16]
+    shots_list = [1,2,4,8,16]  # Add -1 option for using all training data
     base_result_path = getattr(args, 'result_path', None)
     
     # # Zero-shot CLIP evaluation before training
@@ -32,8 +34,8 @@ def main():
     
     # # Use the first shot configuration for zero-shot evaluation
     # args.shots = shots_list[0]
-    # print(f"Preparing dataset for zero-shot evaluation (shots={args.shots}).")
-    # dataset = build_dataset(args.dataset, args.root_path, args.shots, preprocess)
+    # print(f"Preparing dataset for zero-shot evaluation.")
+    # dataset = build_dataset(args.dataset, args.root_path, 0, preprocess)
     
     # # Create data loaders for zero-shot evaluation
     # if args.dataset == 'imagenet':
@@ -41,33 +43,11 @@ def main():
     # else:
     #     test_loader = build_data_loader(data_source=dataset.test, batch_size=args.eval_batch_size, is_train=False, tfm=preprocess, shuffle=False, num_workers=8)
     
-    # # Evaluate zero-shot CLIP
-    # from lora import evaluate_lora
-    # zs_test_acc = evaluate_lora(args, clip_model, test_loader, dataset)
-    # print(f"Zero-shot CLIP Test Accuracy: {zs_test_acc:.2f}%")
-
     # result_path = os.path.join(base_result_path, 'shot0')
-    # os.makedirs(result_path, exist_ok=True)
-    # with open(os.path.join(result_path, 'val_results.json'), 'w') as f:
-    #     import json
-    #     json.dump({f'zs_test_acc_seed{args.seed}': zs_test_acc}, f)
+    # # Evaluate zero-shot CLIP
+    # from utils import evaluate
+    # evaluate(clip_model, "zs", test_loader, dataset, args.eval_datasets, result_path, args.seed)
     
-    # # Evaluate on ImageNet variants if specified
-    # if getattr(args, 'eval_datasets', None):
-    #     eval_list = [d.strip() for d in args.eval_datasets if d.strip()]
-    #     if len(eval_list) > 0 and args.dataset == 'imagenet':
-    #         print("\n--- Zero-shot CLIP on ImageNet Variants ---")
-    #         from lora import _evaluate_imagenet_variant
-    #         zs_variant_results = {}
-    #         for variant in eval_list:
-    #             try:
-    #                 v_acc = _evaluate_imagenet_variant(args, clip_model, variant, args.root_path)
-    #                 print(f"Zero-shot CLIP {variant} accuracy: {v_acc:.2f}%")
-    #                 zs_variant_results[f'zs_acc_{variant}_seed{args.seed}'] = float(v_acc)
-    #             except Exception as e:
-    #                 print(f"Warning: failed evaluating {variant}: {e}")
-    # with open(os.path.join(result_path, 'val_results.json'), 'w') as f:
-    #     json.dump(zs_variant_results, f)
     print("="*60)
     print("STARTING FEW-SHOT TRAINING")
     print("="*60)
@@ -76,7 +56,10 @@ def main():
         # Update shots and per-shot result directory
         args.shots = s
         if base_result_path is not None:
-            args.result_path = os.path.join(base_result_path, f"shots{s}")
+            if s == -1:
+                args.result_path = os.path.join(base_result_path, "shots_all")
+            else:
+                args.result_path = os.path.join(base_result_path, f"shots{s}")
             os.makedirs(args.result_path, exist_ok=True)
 
         # Re-load CLIP model for each shot to avoid LoRA state contamination
@@ -97,7 +80,7 @@ def main():
             
         train_loader = None
         if not args.eval_only:
-            train_tranform = transforms.Compose([
+            train_transform = transforms.Compose([
                 transforms.RandomResizedCrop(size=224, scale=(0.08, 1), interpolation=transforms.InterpolationMode.BICUBIC),
                 transforms.RandomHorizontalFlip(p=0.5),
                 transforms.ToTensor(),
@@ -107,9 +90,17 @@ def main():
             if args.dataset == 'imagenet':
                 train_loader = torch.utils.data.DataLoader(dataset.train_x, batch_size=args.batch_size, num_workers=8, shuffle=True, pin_memory=True)
             else:
-                train_loader = build_data_loader(data_source=dataset.train_x, batch_size=args.batch_size, tfm=train_tranform, is_train=True, shuffle=True, num_workers=8)
+                train_loader = build_data_loader(data_source=dataset.train_x, batch_size=args.batch_size, tfm=train_transform, is_train=True, shuffle=True, num_workers=8)
 
-        run_lora(args, clip_model, logit_scale, dataset, train_loader, val_loader, test_loader)
+        if args.opt == 'adam':
+            print("Running LoRA with AdamW optimization")
+            run_lora_adam(args, clip_model, logit_scale, dataset, train_loader, val_loader, test_loader)
+        elif args.opt == 'ga':
+            print("Running LoRA with GA optimization")
+            run_lora_ga(args, clip_model, dataset, train_loader, val_loader, test_loader)
+            
+        else:
+            raise ValueError("Unknown optimization method specified. Use 'adam' or 'ga'.")
 
 if __name__ == '__main__':
     main()

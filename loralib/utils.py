@@ -105,6 +105,9 @@ def get_lora_parameters(model, bias='none'):
 
 
 def apply_lora(args, clip_model):
+    '''''
+    return a list of LoRA layers
+    '''''
     list_lora_layers = []
     if args.encoder == 'text' or args.encoder == 'both':
         indices = INDEX_POSITIONS_TEXT[args.position]
@@ -132,6 +135,7 @@ def apply_lora(args, clip_model):
     return list_lora_layers
 
 
+# save lora weights into current shot and seed directory
 def save_lora(args, list_lora_layers):
     weights = {}
     for i, layer in enumerate(list_lora_layers):
@@ -172,18 +176,16 @@ def save_lora(args, list_lora_layers):
         'metadata': metadata
     }
 
-    # to manage names like ViT-B/16
-    backbone = args.backbone.replace('/', '').replace('-', '').lower()
-    save_dir = f'{args.save_path}/{backbone}/{args.dataset}/{args.shots}shots/seed{args.seed}'
+    save_dir = f'{args.save_path}/{args.shots}shots/seed{args.seed}'
     os.makedirs(save_dir, exist_ok=True)
 
-    save_path = f'{save_dir}/{args.filename}.pt'
+    save_path = f'{save_dir}/{args.opt}_{args.filename}.pt'
     torch.save(save_data, save_path)
     print(f'LoRA weights saved to {save_path}')
 
 
 def load_lora(args, list_lora_layers):
-    load_path = f'{args.save_path}/{args.shots}shots/seed{args.seed}/{args.filename}.pt'
+    load_path = f'{args.save_path}/{args.shots}shots/seed{args.seed}/{args.opt}_{args.filename}.pt'
 
     if not os.path.exists(load_path):
         raise FileNotFoundError(f'File {load_path} does not exist.')

@@ -180,7 +180,7 @@ imagenet_templates = ["a photo of a {}."]
 
 class ImageNet():
 
-    dataset_dir = 'Imagenet'
+    dataset_dir = 'imagenet'
 
     def __init__(self, root, num_shots, preprocess, train_preprocess=None, test_preprocess=None):
 
@@ -188,13 +188,14 @@ class ImageNet():
         self.image_dir = os.path.join(self.dataset_dir, 'images')
         
         if train_preprocess is None:
-            train_preprocess = transforms.Compose([
-                                                    transforms.RandomResizedCrop(size=224, scale=(0.08, 1), interpolation=transforms.InterpolationMode.BICUBIC),
-                                                    transforms.RandomHorizontalFlip(p=0.5),
-                                                    transforms.ToTensor(),
-                                                    transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711))
-                                                ])
-        
+            # train_preprocess = transforms.Compose([
+            #                                         transforms.RandomResizedCrop(size=224, scale=(0.08, 1), interpolation=transforms.InterpolationMode.BICUBIC),
+            #                                         transforms.RandomHorizontalFlip(p=0.5),
+            #                                         transforms.ToTensor(),
+            #                                         transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711))
+            #                                     ])
+
+            train_preprocess = preprocess
         if test_preprocess is None:
             test_preprocess = preprocess
         
@@ -202,7 +203,10 @@ class ImageNet():
         self.val = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'train')), transform=preprocess)
         self.test = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'val')), transform=test_preprocess)
         
-        num_shots_val = min(4, num_shots)
+        if num_shots == -1:
+            num_shots_val = 4  # Use 4 samples per class for validation when using all training data
+        else:
+            num_shots_val = min(4, num_shots)
         
         self.template = imagenet_templates
         self.classnames = imagenet_classes
@@ -214,12 +218,23 @@ class ImageNet():
         targets = []
         imgs_val = []
         targets_val = []
+        
         for label, items in split_by_label_dict.items():
-            samples = random.sample(items, num_shots + num_shots_val)
-            imgs = imgs + samples[0:num_shots]
-            imgs_val = imgs_val + samples[num_shots:num_shots+num_shots_val]
-            targets = targets + [label for i in range(num_shots)]
-            targets_val = targets_val + [label for i in range(num_shots_val)]
+            if num_shots == -1:
+                # Use all training data
+                samples = items
+                # Use a small subset for validation (max 4 per class)
+                val_samples = random.sample(items, min(num_shots_val, len(items)))
+            else:
+                # Use few-shot sampling
+                samples = random.sample(items, num_shots + num_shots_val)
+                val_samples = samples[num_shots:num_shots+num_shots_val]
+                samples = samples[0:num_shots]
+            
+            imgs = imgs + samples
+            imgs_val = imgs_val + val_samples
+            targets = targets + [label for i in range(len(samples))]
+            targets_val = targets_val + [label for i in range(len(val_samples))]
             
         self.train_x.imgs = imgs
         self.train_x.targets = targets
