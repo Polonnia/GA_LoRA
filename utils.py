@@ -57,7 +57,6 @@ def evaluate_lora(clip_model, loader, dataset, cached_text_features=None, cached
     
     # Ensure the model is on the correct device (use first model device)
     device = next(clip_model.parameters()).device
-    base = unwrap(clip_model)
     
     # Prepare or reuse text features
     if cached_text_features is not None:
@@ -70,7 +69,7 @@ def evaluate_lora(clip_model, loader, dataset, cached_text_features=None, cached
             texts = [template.format(classname.replace('_', ' ')) for classname in dataset.classnames]
             with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
                 texts = clip.tokenize(texts).to(device)
-        class_embeddings = base.encode_text(texts)
+        class_embeddings = clip_model.encode_text(texts)
         text_features = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
 
     acc = 0.0
@@ -92,7 +91,7 @@ def evaluate_lora(clip_model, loader, dataset, cached_text_features=None, cached
             for i, (images, target) in enumerate(progress):
                 images, target = images.to(device, non_blocking=True), target.to(device, non_blocking=True)
                 with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-                    image_features = base.encode_image(images)
+                    image_features = clip_model.encode_image(images)
                 image_features = image_features / image_features.norm(dim=-1, keepdim=True)
                 if image_features.dtype != text_features.dtype:
                     text_features = text_features.to(image_features.dtype)
@@ -103,6 +102,75 @@ def evaluate_lora(clip_model, loader, dataset, cached_text_features=None, cached
     
     acc /= tot_samples
     return acc
+
+def evaluate_loss(
+    clip_model,
+    loader,
+    dataset,
+    cached_text_features=None,
+    cached_tokens=None,
+    cached_image_batches=None,
+):
+    """
+    Compute the average cross-entropy loss of the model (lower is better, but we may return negative loss as fitness to maximize).
+    """
+    import torch
+    import torch.nn.functional as F
+
+    clip_model.eval()
+    device = next(clip_model.parameters()).device
+
+    # Prepare or reuse text features
+    if cached_text_features is not None:
+        text_features = cached_text_features.to(device)
+    else:
+        if cached_tokens is not None:
+            texts = cached_tokens.to(device)
+        else:
+            template = dataset.template[0]
+            texts = [template.format(classname.replace('_', ' ')) for classname in dataset.classnames]
+            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                texts = clip.tokenize(texts).to(device)
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+            class_embeddings = clip_model.encode_text(texts)
+        text_features = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
+
+    total_loss = 0.0
+    total_samples = 0
+
+    loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
+
+    with torch.no_grad():
+        if cached_image_batches is not None:
+            for image_features, target in cached_image_batches:
+                target = target.to(image_features.device)
+                if image_features.dtype != text_features.dtype:
+                    text_features_batch = text_features.to(image_features.dtype)
+                else:
+                    text_features_batch = text_features
+                logits = 100 * (image_features @ text_features_batch.t())
+                loss = loss_fn(logits, target)
+                total_loss += float(loss.item())
+                total_samples += logits.size(0)
+        else:
+            for images, target in loader:
+                images = images.to(device, non_blocking=True)
+                target = target.to(device, non_blocking=True)
+                with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                    image_features = clip_model.encode_image(images)
+                image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+                if image_features.dtype != text_features.dtype:
+                    text_features_batch = text_features.to(image_features.dtype)
+                else:
+                    text_features_batch = text_features
+                logits = 100 * (image_features @ text_features_batch.t())
+                loss = loss_fn(logits, target)
+                total_loss += float(loss.item())
+                total_samples += logits.size(0)
+
+    avg_loss = total_loss / max(total_samples, 1)
+    # Return negative loss as fitness (higher is better for GA)
+    return -avg_loss
 
 
 # _evaluate_imagenet_variant function

@@ -27,9 +27,9 @@ import clip  # OpenAI CLIP tokenizer
 # 全局参数（可按需修改）
 # ------------------------------
 POPULATION_SIZE = 100
-NUM_GENERATIONS = 1000
+NUM_GENERATIONS = 2000
 MUTATION_RATE = 0.30
-MUTATION_RATIO = 0.10
+MUTATION_RATIO = 0.20
 NUM_ELITES = 10
 NUM_PARENTS = 20
 STD_DEV = 0.1  # 高斯噪声标准差
@@ -148,12 +148,6 @@ def mutate_one(
             if mask.any():
                 noise = torch.randn_like(g) * mutation_std
                 g[mask] += noise[mask]
-        # try:
-        #     # print a tiny checksum of first gene to show mutation effect
-        #     if len(chromosome.genes) > 0:
-        #         print(f"[GA] Mutated first gene mean={chromosome.genes[0].mean().item():.6f}")
-        # except Exception:
-        #     pass
     return chromosome
 
 
@@ -224,6 +218,7 @@ def update_fitness(
     list_lora_layers: List[torch.nn.Module],
     train_loader,
     dataset,
+    cached_text_features=None,
     cached_tokens=None,
     cached_image_features=None,
 ):
@@ -235,10 +230,10 @@ def update_fitness(
             clip_model,
             train_loader,
             dataset,
+            cached_text_features=cached_text_features,
             cached_tokens=cached_tokens,
             cached_image_batches=cached_image_features,
         )
-        print(f"chromosome fitness: {chromosome.fitness}\n")
 
 
 def collect_lora_layers(model: torch.nn.Module) -> List[torch.nn.Module]:
@@ -391,6 +386,21 @@ def update_fitness_parallel(
             for idx, fit in fut.result():
                 population[idx].fitness = fit
 
+def precompute_text_features(
+    clip_model,
+    dataset,
+) -> Tuple[Optional[torch.Tensor]]:
+    """
+    Precompute text features for the dataset.
+    """
+    template = dataset.template[0]
+    texts = [template.format(classname.replace("_", " ")) for classname in dataset.classnames]
+    with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+        texts = clip.tokenize(texts)
+        texts = texts.cuda()
+        class_embeddings = clip_model.encode_text(texts)
+        text_features = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
+    return text_features
 
 def _precompute_text_and_images(
     args,
@@ -477,19 +487,28 @@ def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_l
     gen_log_path = os.path.join(result_dir, "ga_generations.json")
     generation_log = []
 
-    # 预计算文本/图像特征缓存（仅 text-encoder 模式）
-    tokens_cache, image_features_cache = _precompute_text_and_images(
-        args, clip_model, dataset, train_loader
-    )
-    
-    tokens_cache = tokens_cache.cuda()
-    image_features_cache = [(feat.cuda(), target) for feat, target in image_features_cache]
+    if args.encoder == "text":
+        # 预计算文本/图像特征缓存（仅 text-encoder 模式）
+        tokens_cache, image_features_cache = _precompute_text_and_images(
+            args, clip_model, dataset, train_loader
+        )
+        
+        tokens_cache = tokens_cache.cuda()
+        image_features_cache = [(feat.cuda(), target) for feat, target in image_features_cache]
+    elif args.encoder == "vision":
+        text_features = precompute_text_features(clip_model, dataset)
 
     # 初始化种群
     # 确保种群大小为偶数（便于两两交叉），同时不小于精英数
     pop_size = max(2 * ((POPULATION_SIZE + 1) // 2), NUM_ELITES + 2)
     population = init_pop(pop_size=pop_size, list_lora_layers=list_lora_layers)
-
+    print(f"population[0].genes[0].shape: {population[0].genes[0].shape}\n")
+    print(f"population[0].genes length: {len(population[0].genes)}\n")
+    # base = population[0]
+    # apply_genes_to_layers(base.genes, list_lora_layers)
+    # train_acc = evaluate_lora(clip_model, train_loader, dataset, cached_tokens=tokens_cache, cached_image_batches=image_features_cache)
+    # val_acc = evaluate_lora(clip_model, val_loader, dataset, cached_tokens=tokens_cache, cached_image_batches=image_features_cache)
+    # print(f"base train_acc: {train_acc:.4f}, base val_acc: {val_acc:.4f}\n")
     # 演化主循环
     for gen in range(NUM_GENERATIONS):
         # evaluate population (parallel across GPUs if available)
@@ -499,8 +518,9 @@ def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_l
                 list_lora_layers,
                 train_loader,
                 dataset,
-                cached_tokens=tokens_cache,
-                cached_image_features=image_features_cache,
+                cached_text_features=text_features,
+                cached_tokens=None,
+                cached_image_features=None,
             )
         best_ind = max(
             population,
@@ -512,22 +532,25 @@ def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_l
 
         # 验证集评估
         if val_loader is not None:
-            best_ind.apply_chromosome_to_model()
+            apply_genes_to_layers(best_ind.genes, list_lora_layers)
             val_acc = evaluate_lora(
                 clip_model,
                 val_loader,
                 dataset,
-                cached_tokens=tokens_cache,
-                cached_image_batches=image_features_cache,
+                cached_tokens=None,
+                cached_image_batches=None,
+                cached_text_features=text_features,
             )
+            save_lora(args, list_lora_layers)
         print(
-            f"[GA] Gen {gen:03d} | Best fitness={best_ind.fitness:.4f}, Avg fitness={avg_fitness:.4f}"
+            f"[GA] Gen {gen:03d} | Best fitness={best_ind.fitness:.4f}, val_acc={val_acc:.4f}"
         )
 
         generation_log.append({
             "generation": int(gen),
             "best_fitness": best_ind.fitness,
             "avg_fitness": avg_fitness,
+            "val_acc": val_acc,
         })
         try:
             with open(gen_log_path, "w", encoding="utf-8") as f:

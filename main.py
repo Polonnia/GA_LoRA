@@ -24,7 +24,7 @@ def main():
     clip_model.eval()
     logit_scale = 100
 
-    shots_list = [1,2,4,8,16]  # Add -1 option for using all training data
+    shots_list = [8]  # Add -1 option for using all training data
     base_result_path = getattr(args, 'result_path', None)
     
     # # Zero-shot CLIP evaluation before training
@@ -97,7 +97,7 @@ def main():
             run_lora_adam(args, clip_model, logit_scale, dataset, train_loader, val_loader, test_loader)
         elif args.opt == 'ga':
             print("Running LoRA with GA optimization")
-            run_lora_ga(args, clip_model, dataset, train_loader, val_loader, test_loader)
+            run_lora_ga(args, clip_model, dataset, train_loader, val_loader, gpu_id=0)
             
         else:
             raise ValueError("Unknown optimization method specified. Use 'adam' or 'ga'.")
