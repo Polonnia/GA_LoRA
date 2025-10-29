@@ -24,7 +24,7 @@ import clip  # OpenAI CLIP tokenizer
 # 全局参数（可按需修改）
 # ------------------------------
 POPULATION_SIZE = 10
-NUM_GENERATIONS = 200
+NUM_GENERATIONS = 5
 MUTATION_RATE = 0.30
 MUTATION_RATIO = 0.20
 NUM_ELITES = 4
@@ -46,55 +46,29 @@ class Chromosome:
     """
     def __init__(self, lora_layers: List[torch.nn.Module]=[]):
         self.fitness: Optional[float] = None
-
-        first_layer = lora_layers[0]
-        if hasattr(first_layer, "enable_lora"):
-            self.enabled_lora = list(first_layer.enable_lora)
-            print(f"[GA] Enabled LoRA projections: {self.enabled_lora}")
-
+        self.need_update: bool = True
         self.genes: List[torch.Tensor] = []
-        for layer in lora_layers:
-            for proj in self.enabled_lora:
-                if proj in ("q", "k", "v"):
-                    proj_layer = getattr(layer, f"{proj}_proj", None)
-                elif proj in ("o", "out"):
-                    proj_layer = getattr(layer, "proj", None)
-                else:
-                    proj_layer = None
+        
+        if len(lora_layers):
+            first_layer = lora_layers[0]
+            if hasattr(first_layer, "enable_lora"):
+                self.enabled_lora = list(first_layer.enable_lora)
+            for layer in lora_layers:
+                for proj in self.enabled_lora:
+                    if proj in ("q", "k", "v"):
+                        proj_layer = getattr(layer, f"{proj}_proj", None)
+                    elif proj in ("o", "out"):
+                        proj_layer = getattr(layer, "proj", None)
+                    else:
+                        proj_layer = None
 
-                if proj_layer is None:
-                    continue
-                if hasattr(proj_layer, "w_lora_A") and hasattr(proj_layer, "w_lora_B"):
-                    a = proj_layer.w_lora_A.detach().clone().cpu().requires_grad_(False)
-                    b = proj_layer.w_lora_B.detach().clone().cpu().requires_grad_(False)
-                    self.genes.append(a)
-                    self.genes.append(b)
-
-    # def apply_chromosome_to_model(self):
-    #     """将 genes 拷回原模型的 LoRA 权重中（按 enabled_lora 顺序）。"""
-    #     idx = 0
-    #     with torch.no_grad():
-    #         for layer in self.lora_layers:
-    #             for proj in self.enabled_lora:
-    #                 if proj in ("q", "k", "v"):
-    #                     mod = getattr(layer, f"{proj}_proj", None)
-    #                 elif proj in ("o", "out"):
-    #                     mod = getattr(layer, "proj", None)
-    #                 else:
-    #                     mod = None
-    #                 if mod is None or not (hasattr(mod, "w_lora_A") and hasattr(mod, "w_lora_B")):
-    #                     continue
-
-    #                 if idx + 1 >= len(self.genes):
-    #                     raise RuntimeError(
-    #                         "Gene count mismatch when applying chromosome to model."
-    #                     )
-
-    #                 a_t = self.genes[idx].to(mod.w_lora_A.device, dtype=mod.w_lora_A.dtype)
-    #                 b_t = self.genes[idx + 1].to(mod.w_lora_B.device, dtype=mod.w_lora_B.dtype)
-    #                 mod.w_lora_A.copy_(a_t)
-    #                 mod.w_lora_B.copy_(b_t)
-    #                 idx += 2
+                    if proj_layer is None:
+                        continue
+                    if hasattr(proj_layer, "w_lora_A") and hasattr(proj_layer, "w_lora_B"):
+                        a = proj_layer.w_lora_A.detach().clone().cpu().requires_grad_(False)
+                        b = proj_layer.w_lora_B.detach().clone().cpu().requires_grad_(False)
+                        self.genes.append(a)
+                        self.genes.append(b)
 
 
 def init_pop(pop_size: int, list_lora_layers: List[torch.nn.Module]) -> List[Chromosome]:
@@ -148,46 +122,49 @@ def reproduce(
     population: List[Chromosome],
     num_elites: int = NUM_ELITES,
     num_parents: int = NUM_PARENTS,
+    tournament_size: int = 2,  # Number of individuals to compete in each tournament
 ) -> List[Chromosome]:
     """
-    生成下一代：
-      - 精英保留：深拷贝前 num_elites 个体
-      - 轮盘赌挑父母池（含全 0 兜底）
-      - 交叉 + 变异 生成其余子代
+    Generate the next generation using tournament selection:
+    - Elite preservation: Deep copy the top num_elites individuals
+    - Tournament selection: Select parents from tournament
+    - Crossover + mutation: Generate remaining offspring
     """
     pop_size = len(population)
     assert pop_size > 0, "empty population"
 
-    # 排序（高 fitness 在前；None 视为 -inf）
+    # Sort the population by fitness (higher fitness first; None is treated as -inf)
     ranked = sorted(
         population,
         key=lambda c: (c.fitness if c.fitness is not None else -float("inf")),
         reverse=True,
     )
 
-    # 精英拷贝
+    # Elite preservation: Keep the top `num_elites` individuals without change
     new_population: List[Chromosome] = []
     keep = min(num_elites, pop_size)
     for i in range(keep):
+        ranked[i].need_update = False
         new_population.append(ranked[i])
 
-    # 轮盘赌概率
-    fits = torch.tensor(
-        [max(0.0, c.fitness if c.fitness is not None else 0.0) for c in ranked],
-        dtype=torch.float32,
-    )
-    total = float(fits.sum())
-    if total <= 0:
-        probs = torch.ones(len(ranked), dtype=torch.float32) / len(ranked)
-    else:
-        probs = fits / total
+    # Tournament selection: Select parents
+    num_parents = max(2, min(num_parents, pop_size))  # Ensure at least 2 parents are selected
 
-    # 父母池（有放回）
-    num_parents = max(2, min(num_parents, pop_size))
-    indices = torch.multinomial(probs, num_parents, replacement=True)
-    mating_pool = [ranked[i] for i in indices.tolist()]
+    def tournament_select(k: int) -> Chromosome:
+        """Helper function to select the best individual from a tournament of size k."""
+        # Randomly pick k individuals from the population
+        tournament = random.sample(ranked, k)
+        # Select the individual with the highest fitness
+        best_individual = max(tournament, key=lambda c: c.fitness if c.fitness is not None else -float("inf"))
+        return best_individual
 
-    # 生成子代直至满员（保证偶数填充）
+    # Parent selection
+    mating_pool = []
+    for _ in range(num_parents):
+        parent = tournament_select(tournament_size)  # Select one parent using tournament selection
+        mating_pool.append(parent)
+
+    # Create offspring using crossover and mutation
     while len(new_population) < pop_size:
         p1, p2 = random.choice(mating_pool), random.choice(mating_pool)
         child1 = mutate_one(crossover(p1, p2))
@@ -197,6 +174,7 @@ def reproduce(
             new_population.append(child2)
 
     return new_population
+
 
 
 @torch.no_grad()
@@ -211,17 +189,18 @@ def update_fitness(
     cached_image_features=None,
 ):
     """逐个个体回写权重并用 evaluate_lora 计算适应度。"""
-    for chromosome in population[NUM_ELITES:]:
-        apply_genes_to_layers(chromosome.genes, list_lora_layers)
-        chromosome.fitness = evaluate_lora(
-            clip_model,
-            train_loader,
-            dataset,
-            cached_text_features=cached_text_features,
-            cached_tokens=cached_tokens,
-            cached_image_batches=cached_image_features,
-        )
-        print(f"[GA] Chromosome fitness: {chromosome.fitness:.4f}")
+    for chromosome in population:
+        if chromosome.need_update == True:
+            apply_genes_to_layers(chromosome.genes, list_lora_layers)
+            chromosome.fitness = evaluate_lora(
+                clip_model,
+                train_loader,
+                dataset,
+                cached_text_features=cached_text_features,
+                cached_tokens=cached_tokens,
+                cached_image_batches=cached_image_features,
+            )
+            print(f"[GA] Chromosome fitness: {chromosome.fitness:.4f}")
 
 
 def collect_lora_layers(model: torch.nn.Module) -> List[torch.nn.Module]:
@@ -476,9 +455,8 @@ def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_l
     
     if args.eval_only:
         load_lora(args, list_lora_layers)
-        clip_model = clip_model.eval()
-        acc_test = evaluate_lora(clip_model, test_loader, dataset)
-        print(f"[GA] Final Test Acc for shots = {args.shots} is {acc_test:.4f}")
+        clip_model = clip_model.cuda().eval()
+        evaluate(clip_model, "ga", test_loader, 'imagenet', args.eval_datasets, args.result_path, args.seed, args.root_path)
         return
 
     # prepare results directory and per-generation log
@@ -564,21 +542,7 @@ def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_l
         )
     apply_genes_to_layers(best_ind.genes, list_lora_layers)
     
-    if test_loader is not None:
-        print("[GA] Evaluating final best individual on test set...")
-        # 最终测试：用最佳个体回写权重
-        if test_loader is not None:
-            acc_test = evaluate(
-                clip_model,
-                "ga",
-                test_loader,
-                dataset,
-                args.eval_datasets,
-                args.result_path,
-                args.seed,
-                args.root_path,
-            )
-            print(f"[GA] Final Test Acc = {acc_test:.4f}")
+    evaluate(clip_model, "ga", test_loader, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
 
     if getattr(args, "save_path", None) is not None:
         # save the current LoRA weights (conventional single save)

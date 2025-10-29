@@ -33,21 +33,6 @@ def clip_classifier(classnames, template, clip_model):
         
     return clip_weights
 
-
-def pre_load_features(clip_model, loader):
-    features, labels = [], []
-    with torch.no_grad():
-        for i, (images, target) in enumerate(tqdm(loader)):
-            images, target = images.cuda(), target.cuda()
-            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-                image_features = clip_model.encode_image(images)
-            image_features /= image_features.norm(dim=-1, keepdim=True)
-            features.append(image_features.cpu())
-            labels.append(target.cpu())
-        features, labels = torch.cat(features), torch.cat(labels)
-    
-    return features, labels
-
 def unwrap(model):
     return model.module if isinstance(model, torch.nn.DataParallel) else model
 
@@ -246,29 +231,22 @@ def evaluate(clip_model, opt, test_loader, dataset, eval_datasets, result_path, 
     acc_test = evaluate_lora(clip_model, test_loader, dataset)
     print("**** Test accuracy: {:.2f}. ****\n".format(acc_test))
     exist.update({f'acc_test_seed{seed}': float(acc_test)})
-    
-    eval_list = []
-    if eval_datasets:
-        if isinstance(eval_datasets, str):
-            eval_list = [d.strip() for d in eval_datasets.split(',') if d.strip()]
-        else:
-            eval_list = [d.strip() for d in eval_datasets if d.strip()]
 
-    if len(eval_list) > 0 and hasattr(dataset, 'name') and dataset.name == 'imagenet':
+    if len(eval_datasets) > 0 and dataset == 'imagenet':
         try:
-            for v in eval_list:
+            for v in eval_datasets:
                 print(f"Evaluating {v}...")
                 v_acc = evaluate_imagenet_variant(clip_model, v, root_path)
                 print(f"**** {v} accuracy: {v_acc:.2f}. ****")
                 
                 exist.update({f'acc_{v}_seed{seed}': float(v_acc)})
         except Exception as e:
-            print(f"Warning: failed evaluating variants {eval_list}: {e}")
+            print(f"Warning: failed evaluating variants {eval_datasets}: {e}")
     
     # Save results
     with open(result_json_path, 'w') as f:
         json.dump(exist, f, indent=2)
-    return acc_test
+    return
 
 def _build_clip_preprocess():
     # Minimal CLIP-like eval preprocess

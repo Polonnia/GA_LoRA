@@ -97,7 +97,7 @@ def main():
             run_lora_adam(args, clip_model, logit_scale, dataset, train_loader, val_loader, test_loader)
         elif args.opt == 'ga':
             print("Running LoRA with GA optimization")
-            run_lora_ga(args, clip_model, dataset, train_loader, val_loader, gpu_id=2)
+            run_lora_ga(args, clip_model, dataset, train_loader, val_loader, test_loader, gpu_id=2)
             
         else:
             raise ValueError("Unknown optimization method specified. Use 'adam' or 'ga'.")
