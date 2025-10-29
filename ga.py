@@ -11,10 +11,7 @@ from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from utils import *  # 需包含：apply_lora, evaluate_lora, evaluate, save_lora 等
 from loralib.utils import (
-    mark_only_lora_as_trainable,
-    apply_lora,  # 重复导入容忍；若你的 utils 里也有同名，请以本地为准
-    get_lora_parameters,
-    lora_state_dict,
+    apply_lora,
     save_lora,
     load_lora,
 )
@@ -26,12 +23,12 @@ import clip  # OpenAI CLIP tokenizer
 # ------------------------------
 # 全局参数（可按需修改）
 # ------------------------------
-POPULATION_SIZE = 100
-NUM_GENERATIONS = 2000
+POPULATION_SIZE = 10
+NUM_GENERATIONS = 200
 MUTATION_RATE = 0.30
 MUTATION_RATIO = 0.20
-NUM_ELITES = 10
-NUM_PARENTS = 20
+NUM_ELITES = 4
+NUM_PARENTS = 2
 STD_DEV = 0.1  # 高斯噪声标准差
 SEED = 42
 
@@ -47,17 +44,13 @@ class Chromosome:
     一个个体：保存 LoRA A/B 因子的拷贝（CPU、无梯度），并能回写到模型中。
     genes 顺序：按 enabled_lora（如 ['q','k','v','o']）遍历每层，依次 push [A, B]。
     """
-    def __init__(self, lora_layers: List[torch.nn.Module]):
-        self.lora_layers = lora_layers
+    def __init__(self, lora_layers: List[torch.nn.Module]=[]):
         self.fitness: Optional[float] = None
 
-        # 读取启用的 LoRA 投影类型顺序（以第一层为准）
-        enabled = []
-        if len(lora_layers) > 0 and hasattr(lora_layers[0], "q_proj"):
-            qp = lora_layers[0].q_proj
-            if hasattr(qp, "enable_lora"):
-                enabled = list(qp.enable_lora)
-        self.enabled_lora: List[str] = enabled  # 例如 ['q','k','v','o']
+        first_layer = lora_layers[0]
+        if hasattr(first_layer, "enable_lora"):
+            self.enabled_lora = list(first_layer.enable_lora)
+            print(f"[GA] Enabled LoRA projections: {self.enabled_lora}")
 
         self.genes: List[torch.Tensor] = []
         for layer in lora_layers:
@@ -77,31 +70,31 @@ class Chromosome:
                     self.genes.append(a)
                     self.genes.append(b)
 
-    def apply_chromosome_to_model(self):
-        """将 genes 拷回原模型的 LoRA 权重中（按 enabled_lora 顺序）。"""
-        idx = 0
-        with torch.no_grad():
-            for layer in self.lora_layers:
-                for proj in self.enabled_lora:
-                    if proj in ("q", "k", "v"):
-                        mod = getattr(layer, f"{proj}_proj", None)
-                    elif proj in ("o", "out"):
-                        mod = getattr(layer, "proj", None)
-                    else:
-                        mod = None
-                    if mod is None or not (hasattr(mod, "w_lora_A") and hasattr(mod, "w_lora_B")):
-                        continue
+    # def apply_chromosome_to_model(self):
+    #     """将 genes 拷回原模型的 LoRA 权重中（按 enabled_lora 顺序）。"""
+    #     idx = 0
+    #     with torch.no_grad():
+    #         for layer in self.lora_layers:
+    #             for proj in self.enabled_lora:
+    #                 if proj in ("q", "k", "v"):
+    #                     mod = getattr(layer, f"{proj}_proj", None)
+    #                 elif proj in ("o", "out"):
+    #                     mod = getattr(layer, "proj", None)
+    #                 else:
+    #                     mod = None
+    #                 if mod is None or not (hasattr(mod, "w_lora_A") and hasattr(mod, "w_lora_B")):
+    #                     continue
 
-                    if idx + 1 >= len(self.genes):
-                        raise RuntimeError(
-                            "Gene count mismatch when applying chromosome to model."
-                        )
+    #                 if idx + 1 >= len(self.genes):
+    #                     raise RuntimeError(
+    #                         "Gene count mismatch when applying chromosome to model."
+    #                     )
 
-                    a_t = self.genes[idx].to(mod.w_lora_A.device, dtype=mod.w_lora_A.dtype)
-                    b_t = self.genes[idx + 1].to(mod.w_lora_B.device, dtype=mod.w_lora_B.dtype)
-                    mod.w_lora_A.copy_(a_t)
-                    mod.w_lora_B.copy_(b_t)
-                    idx += 2
+    #                 a_t = self.genes[idx].to(mod.w_lora_A.device, dtype=mod.w_lora_A.dtype)
+    #                 b_t = self.genes[idx + 1].to(mod.w_lora_B.device, dtype=mod.w_lora_B.dtype)
+    #                 mod.w_lora_A.copy_(a_t)
+    #                 mod.w_lora_B.copy_(b_t)
+    #                 idx += 2
 
 
 def init_pop(pop_size: int, list_lora_layers: List[torch.nn.Module]) -> List[Chromosome]:
@@ -118,8 +111,8 @@ def init_pop(pop_size: int, list_lora_layers: List[torch.nn.Module]) -> List[Chr
 
 def crossover(parent1: Chromosome, parent2: Chromosome) -> Chromosome:
     """按基因粒度二择一整块继承（0.5 概率），保持 tensor 形状一致。"""
-    child = Chromosome(parent1.lora_layers)
-    child.enabled_lora = parent1.enabled_lora[:]  # 保持同顺序
+    child = Chromosome()
+    child.enabled_lora = parent1.enabled_lora[:]
     child.genes = []
     for i, (g1, g2) in enumerate(zip(parent1.genes, parent2.genes)):
         if torch.rand(1).item() < 0.5:
@@ -176,12 +169,7 @@ def reproduce(
     new_population: List[Chromosome] = []
     keep = min(num_elites, pop_size)
     for i in range(keep):
-        elite_src = ranked[i]
-        elite = Chromosome(elite_src.lora_layers)
-        elite.enabled_lora = elite_src.enabled_lora[:]
-        elite.genes = [g.clone() for g in elite_src.genes]
-        elite.fitness = elite_src.fitness
-        new_population.append(elite)
+        new_population.append(ranked[i])
 
     # 轮盘赌概率
     fits = torch.tensor(
@@ -222,9 +210,8 @@ def update_fitness(
     cached_tokens=None,
     cached_image_features=None,
 ):
-    print("update fitness called\n")
     """逐个个体回写权重并用 evaluate_lora 计算适应度。"""
-    for chromosome in population:
+    for chromosome in population[NUM_ELITES:]:
         apply_genes_to_layers(chromosome.genes, list_lora_layers)
         chromosome.fitness = evaluate_lora(
             clip_model,
@@ -234,6 +221,7 @@ def update_fitness(
             cached_tokens=cached_tokens,
             cached_image_batches=cached_image_features,
         )
+        print(f"[GA] Chromosome fitness: {chromosome.fitness:.4f}")
 
 
 def collect_lora_layers(model: torch.nn.Module) -> List[torch.nn.Module]:
@@ -254,6 +242,7 @@ def apply_genes_to_layers(genes: List[torch.Tensor], lora_layers: List[torch.nn.
     idx = 0
     with torch.no_grad():
         for layer in lora_layers:
+            layer.cuda()
             # determine enabled projections order using layer's q_proj
             enabled = []
             if hasattr(layer, "q_proj") and hasattr(layer.q_proj, "enable_lora"):
@@ -270,7 +259,7 @@ def apply_genes_to_layers(genes: List[torch.Tensor], lora_layers: List[torch.nn.
 
                 if idx + 1 >= len(genes):
                     raise RuntimeError("Gene count mismatch when applying genes to layers.")
-
+                
                 # If module supports lora_train, ensure it's unmerged so copying A/B affects forward
                 try:
                     if hasattr(mod, 'lora_train'):
@@ -290,116 +279,126 @@ def apply_genes_to_layers(genes: List[torch.Tensor], lora_layers: List[torch.nn.
                         mod.lora_train(False)
                 except Exception:
                     pass
-
-                # debug: small checksum to help trace changes (print sparsely)
-                try:
-                    if idx == 0:
-                        # print LoRA params and a quick check that merged weights changed
-                        mean_a = mod.w_lora_A.mean().item()
-                        mean_b = mod.w_lora_B.mean().item()
-                        merged_flag = getattr(mod, 'merged', None)
-                        # try to compute a small checksum of the effective weight (first 4 elems)
-                        eff_w_sample = None
-                        try:
-                            # attempt to get the base weight if present
-                            base_w = getattr(mod, 'weight', None)
-                            if base_w is not None:
-                                eff_w_sample = base_w.view(-1)[:4].cpu().numpy().tolist()
-                        except Exception:
-                            eff_w_sample = None
-                except Exception:
-                    pass
                 idx += 2
 
 
-def update_fitness_parallel(
-    population: List[Chromosome],
-    device_models: List[torch.nn.Module],
-    device_lora_layers: List[List[torch.nn.Module]],
-    train_loader,
-    dataset,
-    cached_tokens=None,
-    cached_image_features=None,
-):
-    """Evaluate population in parallel across multiple device_models.
+# def update_fitness_parallel(
+#     population: List[Chromosome],
+#     device_models: List[torch.nn.Module],
+#     device_lora_layers: List[List[torch.nn.Module]],
+#     train_loader,
+#     dataset,
+#     cached_tokens=None,
+#     cached_image_features=None,
+# ):
+#     """Evaluate population in parallel across multiple device_models.
 
-    Each device_model is a deepcopy of the base model moved to a specific device. We distribute
-    chromosomes round-robin to devices and evaluate them concurrently with threads.
-    """
-    num_devices = len(device_models)
-    if num_devices == 0:
-        raise RuntimeError("No device models provided for parallel evaluation.")
+#     Each device_model is a deepcopy of the base model moved to a specific device. We distribute
+#     chromosomes round-robin to devices and evaluate them concurrently with threads.
+#     """
+#     num_devices = len(device_models)
+#     if num_devices == 0:
+#         raise RuntimeError("No device models provided for parallel evaluation.")
 
-    # partition indices round-robin
-    assignments = [[] for _ in range(num_devices)]
-    for i, chrom in enumerate(population):
-        assignments[i % num_devices].append((i, chrom))
+#     # partition indices round-robin
+#     assignments = [[] for _ in range(num_devices)]
+#     for i, chrom in enumerate(population):
+#         assignments[i % num_devices].append((i, chrom))
 
-    def eval_chunk(device_idx, items):
-        # ensure this worker thread uses the correct CUDA device
-        try:
-            if torch.cuda.is_available():
-                torch.cuda.set_device(device_idx)
-        except Exception:
-            pass
+#     def eval_chunk(device_idx, items):
+#         # ensure this worker thread uses the correct CUDA device
+#         try:
+#             if torch.cuda.is_available():
+#                 torch.cuda.set_device(device_idx)
+#         except Exception:
+#             pass
 
-        model = device_models[device_idx]
-        lora_layers = device_lora_layers[device_idx]
-        dev = next(model.parameters()).device if any(p is not None for p in model.parameters()) else torch.device("cpu")
+#         model = device_models[device_idx]
+#         lora_layers = device_lora_layers[device_idx]
+#         dev = next(model.parameters()).device if any(p is not None for p in model.parameters()) else torch.device("cpu")
 
-        # prepare per-device cached inputs
-        tokens = None
-        if cached_tokens is not None:
-            try:
-                tokens = cached_tokens.to(dev)
-            except Exception:
-                tokens = cached_tokens
+#         # prepare per-device cached inputs
+#         tokens = None
+#         if cached_tokens is not None:
+#             try:
+#                 tokens = cached_tokens.to(dev)
+#             except Exception:
+#                 tokens = cached_tokens
 
-        image_feats = None
-        if cached_image_features is not None:
-            image_feats = []
-            for feats, target in cached_image_features:
-                try:
-                    image_feats.append((feats.to(dev), target))
-                except Exception:
-                    image_feats.append((feats, target))
+#         image_feats = None
+#         if cached_image_features is not None:
+#             image_feats = []
+#             for feats, target in cached_image_features:
+#                 try:
+#                     image_feats.append((feats.to(dev), target))
+#                 except Exception:
+#                     image_feats.append((feats, target))
 
-        results = []
-        for idx, chrom in items:
-            # apply genes into this device's model layers
-            apply_genes_to_layers(chrom.genes, lora_layers)
-            # run evaluation on this device model
-            fit = evaluate_lora(
-                model,
-                train_loader,
-                dataset,
-                cached_tokens=tokens,
-                cached_image_batches=image_feats,
-            )
-            results.append((idx, float(fit)))
-        return results
+#         results = []
+#         for idx, chrom in items:
+#             # apply genes into this device's model layers
+#             apply_genes_to_layers(chrom.genes, lora_layers)
+#             # run evaluation on this device model
+#             fit = evaluate_lora(
+#                 model,
+#                 train_loader,
+#                 dataset,
+#                 cached_tokens=tokens,
+#                 cached_image_batches=image_feats,
+#             )
+#             results.append((idx, float(fit)))
+#         return results
 
-    # run threads
-    with ThreadPoolExecutor(max_workers=num_devices) as exe:
-        futures = [exe.submit(eval_chunk, i, assignments[i]) for i in range(num_devices)]
-        for fut in as_completed(futures):
-            for idx, fit in fut.result():
-                population[idx].fitness = fit
+#     # run threads
+#     with ThreadPoolExecutor(max_workers=num_devices) as exe:
+#         futures = [exe.submit(eval_chunk, i, assignments[i]) for i in range(num_devices)]
+#         for fut in as_completed(futures):
+#             for idx, fit in fut.result():
+#                 population[idx].fitness = fit
 
 def precompute_text_features(
     clip_model,
     dataset,
 ) -> Tuple[Optional[torch.Tensor]]:
     """
-    Precompute text features for the dataset.
+    Precompute text features for the dataset with memory optimization.
     """
+    device = next(clip_model.parameters()).device
+    print(f"clip_model is on device: {device}")
     template = dataset.template[0]
     texts = [template.format(classname.replace("_", " ")) for classname in dataset.classnames]
-    with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-        texts = clip.tokenize(texts)
-        texts = texts.cuda()
-        class_embeddings = clip_model.encode_text(texts)
-        text_features = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
+    
+    # 清空GPU缓存
+    torch.cuda.empty_cache()
+    
+    # 分批处理文本以避免内存溢出
+    batch_size = 32  # 减小批次大小
+    text_features_list = []
+    
+    for i in range(0, len(texts), batch_size):
+        batch_texts = texts[i:i+batch_size]
+        with torch.no_grad():
+            # Tokenize当前批次
+            batch_tokens = clip.tokenize(batch_texts).to(device)
+            
+            # 使用更节省内存的autocast
+            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                batch_embeddings = clip_model.encode_text(batch_tokens)
+                batch_features = batch_embeddings / batch_embeddings.norm(dim=-1, keepdim=True)
+            
+            # 立即移动到CPU并清理
+            text_features_list.append(batch_features.cpu())
+            
+            # 清理当前批次的变量
+            del batch_tokens, batch_embeddings, batch_features
+            torch.cuda.empty_cache()
+    
+    # 在CPU上合并所有特征
+    text_features = torch.cat(text_features_list, dim=0)
+    
+    # 最终如果需要返回GPU tensor，可以选择性放回GPU
+    # text_features = text_features.to(device)
+    
     return text_features
 
 def _precompute_text_and_images(
@@ -463,7 +462,7 @@ def _precompute_text_and_images(
     return tokens_cache, image_features_cache
 
 
-def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_loader=None, gpu_id=0):
+def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_loader=None, gpu_id=1):
     """
     入口：对应用了 LoRA 的 clip_model 进行 GA 搜索 LoRA 因子。
     """
@@ -471,9 +470,10 @@ def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_l
     set_global_seed(SEED)
     torch.cuda.set_device(gpu_id)
 
+    clip_model = clip_model.cuda()
     # 应用 LoRA 并上 GPU
     list_lora_layers = apply_lora(args, clip_model)
-    clip_model = clip_model.cuda()
+    
     if args.eval_only:
         load_lora(args, list_lora_layers)
         clip_model = clip_model.eval()
@@ -502,8 +502,6 @@ def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_l
     # 确保种群大小为偶数（便于两两交叉），同时不小于精英数
     pop_size = max(2 * ((POPULATION_SIZE + 1) // 2), NUM_ELITES + 2)
     population = init_pop(pop_size=pop_size, list_lora_layers=list_lora_layers)
-    print(f"population[0].genes[0].shape: {population[0].genes[0].shape}\n")
-    print(f"population[0].genes length: {len(population[0].genes)}\n")
     # base = population[0]
     # apply_genes_to_layers(base.genes, list_lora_layers)
     # train_acc = evaluate_lora(clip_model, train_loader, dataset, cached_tokens=tokens_cache, cached_image_batches=image_features_cache)
@@ -564,7 +562,7 @@ def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_l
             population,
             key=lambda c: c.fitness if c.fitness is not None else -float("inf"),
         )
-    best_ind.apply_chromosome_to_model()
+    apply_genes_to_layers(best_ind.genes, list_lora_layers)
     
     if test_loader is not None:
         print("[GA] Evaluating final best individual on test set...")
@@ -603,11 +601,7 @@ def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_l
 
                 for rank, elite in enumerate(elites):
                     try:
-                        # prepare a model copy (on CPU) to apply this elite's genes into
-                        model_copy = deepcopy(clip_model.cpu().eval())
-                        lora_layers_copy = collect_lora_layers(model_copy)
-                        # apply the elite genes into the copy's lora layers
-                        apply_genes_to_layers(elite.genes, lora_layers_copy)
+                        apply_genes_to_layers(elite.genes, list_lora_layers)
 
                         # set a filename suffix for this elite save
                         suffix = f"elite{rank:02d}_acc{elite.fitness:.4f}"
@@ -617,7 +611,7 @@ def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_l
                             args.filename = f"lora_{suffix}"
 
                         # save this elite's LoRA weights
-                        save_lora(args, lora_layers_copy)
+                        save_lora(args, list_lora_layers)
                     except Exception as e:
                         print(f"[GA] Warning: failed to save elite {rank}: {e}")
 

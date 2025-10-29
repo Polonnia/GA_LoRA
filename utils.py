@@ -63,12 +63,12 @@ def evaluate_lora(clip_model, loader, dataset, cached_text_features=None, cached
         text_features = cached_text_features
     else:
         if cached_tokens is not None:
-            texts = cached_tokens.to(device)  # 确保tokens在正确设备上
+            texts = cached_tokens.to(device)  # Ensure tokens are on the correct device
         else:
             template = dataset.template[0]
             texts = [template.format(classname.replace('_', ' ')) for classname in dataset.classnames]
             with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-                texts = clip.tokenize(texts).to(device)
+                texts = clip.tokenize(texts).to(device)  # Move tokens to the correct device
         class_embeddings = clip_model.encode_text(texts)
         text_features = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
 
@@ -77,12 +77,14 @@ def evaluate_lora(clip_model, loader, dataset, cached_text_features=None, cached
     with torch.no_grad():
         if cached_image_batches is not None:
             for image_features, target in cached_image_batches:
-                # image_features may be on GPU while cached targets are stored on CPU.
-                # Move target to the same device as image_features before computing accuracy.
-                target = target.to(image_features.device)
-                # ensure dtypes match (image_features may be half under autocast)
+                # Ensure image_features and target are on the correct device
+                image_features = image_features.to(device)
+                target = target.to(device)
+
+                # Ensure dtypes match (image_features may be half under autocast)
                 if image_features.dtype != text_features.dtype:
                     text_features = text_features.to(image_features.dtype)
+
                 cosine_similarity = image_features @ text_features.t()
                 acc += cls_acc(cosine_similarity, target) * len(cosine_similarity)
                 tot_samples += len(cosine_similarity)
@@ -90,11 +92,20 @@ def evaluate_lora(clip_model, loader, dataset, cached_text_features=None, cached
             progress = tqdm(loader, desc="Eval batches", leave=False)
             for i, (images, target) in enumerate(progress):
                 images, target = images.to(device, non_blocking=True), target.to(device, non_blocking=True)
+                
                 with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
                     image_features = clip_model.encode_image(images)
+                
                 image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+                # Ensure dtypes match and both tensors are on the same device
                 if image_features.dtype != text_features.dtype:
                     text_features = text_features.to(image_features.dtype)
+                
+                # Ensure both image_features and text_features are on the same device
+                if image_features.device != text_features.device:
+                    text_features = text_features.to(image_features.device)
+
                 cosine_similarity = image_features @ text_features.t()
                 acc += cls_acc(cosine_similarity, target) * len(cosine_similarity)
                 tot_samples += len(cosine_similarity)
@@ -102,6 +113,7 @@ def evaluate_lora(clip_model, loader, dataset, cached_text_features=None, cached
     
     acc /= tot_samples
     return acc
+
 
 def evaluate_loss(
     clip_model,
