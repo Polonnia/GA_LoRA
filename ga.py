@@ -60,7 +60,7 @@ class Chromosome:
         self.enabled_lora: List[str] = enabled  # 例如 ['q','k','v','o']
 
         self.genes: List[torch.Tensor] = []
-        for layer in self.lora_layers:
+        for layer in lora_layers:
             for proj in self.enabled_lora:
                 if proj in ("q", "k", "v"):
                     proj_layer = getattr(layer, f"{proj}_proj", None)
