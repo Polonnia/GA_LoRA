@@ -31,12 +31,20 @@ def run_lora_adam(args, clip_model, logit_scale, dataset, train_loader, val_load
     total_iters = args.n_iters * args.shots
     
     optimizer = torch.optim.AdamW(get_lora_parameters(clip_model), weight_decay=1e-2, betas=(0.9, 0.999), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, total_iters, eta_min=1e-6)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, total_iters, eta_min=1e-7)
     
     # training LoRA
     scaler = torch.cuda.amp.GradScaler()
     count_iters = 0
     finish = False
+    
+    template = dataset.template[0]
+    texts = [template.format(classname.replace('_', ' ')) for classname in dataset.classnames]
+    with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+        texts = clip.tokenize(texts).cuda()
+        class_embeddings = clip_model.encode_text(texts)
+    text_features = class_embeddings/class_embeddings.norm(dim=-1, keepdim=True)
+    
     while count_iters < total_iters:
         clip_model.train()
         acc_train = 0
@@ -44,13 +52,9 @@ def run_lora_adam(args, clip_model, logit_scale, dataset, train_loader, val_load
         loss_epoch = 0.
 
         for i, (images, target) in enumerate(tqdm(train_loader)):
-            
-            template = dataset.template[0]
-            texts = [template.format(classname.replace('_', ' ')) for classname in dataset.classnames]
             images, target = images.cuda(), target.cuda()
             if args.encoder == 'text' or args.encoder == 'both':
                 with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-                    texts = clip.tokenize(texts).cuda()
                     class_embeddings = clip_model.encode_text(texts)
                 text_features = class_embeddings/class_embeddings.norm(dim=-1, keepdim=True)
                 
@@ -94,7 +98,7 @@ def run_lora_adam(args, clip_model, logit_scale, dataset, train_loader, val_load
             print("**** Val accuracy: {:.2f}. ****\n".format(acc_val))
         
     
-    #evaluate(clip_model, 'adam', test_loader, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
+    evaluate(clip_model, "adam", test_loader, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
     
     if args.save_path != None:
         save_lora(args, list_lora_layers)

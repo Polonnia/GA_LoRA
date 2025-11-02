@@ -23,12 +23,12 @@ import clip  # OpenAI CLIP tokenizer
 # ------------------------------
 # 全局参数（可按需修改）
 # ------------------------------
-POPULATION_SIZE = 10
-NUM_GENERATIONS = 5
+POPULATION_SIZE = 100
+NUM_GENERATIONS = 4000
 MUTATION_RATE = 0.30
 MUTATION_RATIO = 0.20
-NUM_ELITES = 4
-NUM_PARENTS = 2
+NUM_ELITES = 10
+NUM_PARENTS = 20
 STD_DEV = 0.1  # 高斯噪声标准差
 SEED = 42
 
@@ -200,7 +200,6 @@ def update_fitness(
                 cached_tokens=cached_tokens,
                 cached_image_batches=cached_image_features,
             )
-            print(f"[GA] Chromosome fitness: {chromosome.fitness:.4f}")
 
 
 def collect_lora_layers(model: torch.nn.Module) -> List[torch.nn.Module]:
@@ -343,7 +342,6 @@ def precompute_text_features(
     Precompute text features for the dataset with memory optimization.
     """
     device = next(clip_model.parameters()).device
-    print(f"clip_model is on device: {device}")
     template = dataset.template[0]
     texts = [template.format(classname.replace("_", " ")) for classname in dataset.classnames]
     
@@ -456,7 +454,7 @@ def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_l
     if args.eval_only:
         load_lora(args, list_lora_layers)
         clip_model = clip_model.cuda().eval()
-        evaluate(clip_model, "ga", test_loader, 'imagenet', args.eval_datasets, args.result_path, args.seed, args.root_path)
+        evaluate(clip_model, "ga", test_loader, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
         return
 
     # prepare results directory and per-generation log

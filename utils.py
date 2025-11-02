@@ -3,6 +3,7 @@ import torch
 import clip
 from datasets.imagenet_a import ImageNetA
 from datasets.imagenet_r import ImageNetR
+from datasets.imagenetv2 import ImageNetV2
 
 def cls_acc(output, target, topk=1):
     pred = output.topk(topk, 1, True, True)[1].t()
@@ -74,8 +75,7 @@ def evaluate_lora(clip_model, loader, dataset, cached_text_features=None, cached
                 acc += cls_acc(cosine_similarity, target) * len(cosine_similarity)
                 tot_samples += len(cosine_similarity)
         else:
-            progress = tqdm(loader, desc="Eval batches", leave=False)
-            for i, (images, target) in enumerate(progress):
+            for images, target in loader:
                 images, target = images.to(device, non_blocking=True), target.to(device, non_blocking=True)
                 
                 with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
@@ -94,7 +94,6 @@ def evaluate_lora(clip_model, loader, dataset, cached_text_features=None, cached
                 cosine_similarity = image_features @ text_features.t()
                 acc += cls_acc(cosine_similarity, target) * len(cosine_similarity)
                 tot_samples += len(cosine_similarity)
-            progress.close()
     
     acc /= tot_samples
     return acc
@@ -175,12 +174,15 @@ def evaluate_loss(
 def evaluate_imagenet_variant(clip_model, variant_name, root_path):
     preprocess = _build_clip_preprocess()
 
-    if variant_name == 'imagenet-a':
+    if variant_name == 'imagenet-v2':
+        dataset_obj = ImageNetV2(preprocess=preprocess, root="/home/dingzijin/datasets/ImagenetV2/imagenetv2-matched-frequency-format-val")
+    elif variant_name == 'imagenet-a':
         dataset_obj = ImageNetA(preprocess=preprocess, location=root_path)
     elif variant_name == 'imagenet-r':
         dataset_obj = ImageNetR(preprocess=preprocess, location=root_path)
     else:
         raise ValueError(f'Unknown variant {variant_name}')
+
 
     # Zero-shot classifier
     template = ['a photo of a {}.']
@@ -228,11 +230,11 @@ def evaluate(clip_model, opt, test_loader, dataset, eval_datasets, result_path, 
             exist = json.load(f)
     except Exception:
         exist = {}
-    acc_test = evaluate_lora(clip_model, test_loader, dataset)
-    print("**** Test accuracy: {:.2f}. ****\n".format(acc_test))
-    exist.update({f'acc_test_seed{seed}': float(acc_test)})
+    # acc_test = evaluate_lora(clip_model, test_loader, dataset)
+    # print("**** Test accuracy: {:.2f}. ****\n".format(acc_test))
+    # exist.update({f'acc_test_seed{seed}': float(acc_test)})
 
-    if len(eval_datasets) > 0 and dataset == 'imagenet':
+    if len(eval_datasets) > 0:
         try:
             for v in eval_datasets:
                 print(f"Evaluating {v}...")
