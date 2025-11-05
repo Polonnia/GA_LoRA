@@ -20,7 +20,7 @@ def get_arguments():
     parser.add_argument('--root_path', type=str, default='/data/dataset', help='path to dataset root directory')
     parser.add_argument('--dataset', type=str, default='imagenet')
     parser.add_argument('--shots', default=16, type=int, help='Number of shots per class. Use -1 for all training data.')
-    parser.add_argument('--opt', default='ga', type=str, help='Optimization method. Use "adam" or "ga".')
+    parser.add_argument('--opt', default='adam', type=str, help='Optimization method. Use "adam" or "ga".')
     # Model arguments
     parser.add_argument('--backbone', default='ViT-B/16', type=str)
     # Training arguments
@@ -40,7 +40,7 @@ def get_arguments():
     
     parser.add_argument('--eval_only', default=False, action='store_true', help='only evaluate the LoRA modules (save_path should not be None)')
     parser.add_argument('--result_path', default='/home/dingzijin/results', type=str, help='directory to save validation results (e.g., accuracies)')
-    parser.add_argument('--eval_datasets', default='imagenet-v2,imagenet-a,imagenet-r', type=lambda x: x.split(','), help='comma-separated list of eval datasets, e.g. imagenet-v2,imagenet-a,imagenet-r')
+    parser.add_argument('--eval_datasets', default='imagenet-a,imagenet-r,imagenet-v2,imagenet-sketch', type=lambda x: x.split(','), help='comma-separated list of eval datasets, e.g. imagenet-v2,imagenet-a,imagenet-r')
     parser.add_argument('--eval_batch_size', default=32, type=int, help='batch size for evaluation/feature preloading to avoid OOM')
     args = parser.parse_args()
 

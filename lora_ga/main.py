@@ -1,0 +1,159 @@
+import os
+import json
+import time
+from typing import Optional
+import torch
+
+from core.evolution import EvolutionEngine
+from core.parallel import ParallelEvaluator
+from utils.noise_table import SharedNoiseTable
+from utils.evaluation import evaluate_lora, apply_genes_to_layers, precompute_text_features
+from config import *
+from ..loralib.utils import set_global_seed, apply_lora, save_lora, load_lora, evaluate
+
+def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_loader=None, gpu_id=0):
+    """
+    优化的LoRA GA主函数
+    """
+    set_global_seed(args.seed)
+    torch.cuda.set_device(gpu_id)
+
+    clip_model = clip_model.cuda()
+    
+    # 应用LoRA
+    list_lora_layers = apply_lora(args, clip_model)
+    
+    if args.eval_only:
+        load_lora(args, list_lora_layers)
+        clip_model = clip_model.cuda().eval()
+        evaluate(clip_model, "ga", test_loader, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
+        return
+
+    # 初始化优化组件
+    noise_table = SharedNoiseTable(size=NOISE_TABLE_SIZE, seed=NOISE_SEED)
+    evolution_engine = EvolutionEngine(
+        noise_table=noise_table,
+        use_adaptive_mutation=True  # 使用自适应突变
+    )
+    parallel_evaluator = ParallelEvaluator(clip_model, list_lora_layers)
+    
+    # 预计算特征
+    if args.encoder == "vision":
+        text_features = precompute_text_features(clip_model, dataset)
+    else:
+        text_features = None
+
+    # 初始化种群
+    pop_size = max(2 * ((POPULATION_SIZE + 1) // 2), NUM_ELITES + 2)
+    population = evolution_engine.initialize_population(list_lora_layers, pop_size)
+    
+    # 结果记录
+    result_dir = getattr(args, "result_path", None) or os.getcwd()
+    os.makedirs(result_dir, exist_ok=True)
+    gen_log_path = os.path.join(result_dir, "ga_optimized_generations.json")
+    generation_log = []
+
+    # 进化主循环
+    for gen in range(NUM_GENERATIONS):
+        start_time = time.time()
+        
+        # 并行评估种群
+        parallel_evaluator.evaluate_population_parallel(
+            population, train_loader, dataset, text_features
+        )
+        
+        # 获取统计信息
+        stats = evolution_engine.get_population_stats(population)
+        best_ind = evolution_engine.get_best_individual(population)
+        
+        # 验证集评估
+        if val_loader is not None:
+            apply_genes_to_layers(best_ind.genes, list_lora_layers)
+            val_acc = evaluate_lora(
+                clip_model, val_loader, dataset, cached_text_features=text_features
+            )
+            save_lora(args, list_lora_layers)
+        else:
+            val_acc = 0.0
+        
+        # 记录日志
+        generation_time = time.time() - start_time
+        generation_log.append({
+            "generation": gen,
+            "best_fitness": stats['best_fitness'],
+            "avg_fitness": stats['avg_fitness'],
+            "std_fitness": stats['std_fitness'],
+            "val_acc": val_acc,
+            "generation_time": generation_time
+        })
+        
+        print(
+            f"[Optimized GA] Gen {gen:03d} | "
+            f"Best: {stats['best_fitness']:.4f}, Avg: {stats['avg_fitness']:.4f} | "
+            f"Val: {val_acc:.4f} | Time: {generation_time:.1f}s"
+        )
+        
+        # 保存日志
+        try:
+            with open(gen_log_path, "w", encoding="utf-8") as f:
+                json.dump(generation_log, f, indent=2)
+        except Exception as e:
+            print(f"[GA] Warning: failed to write generation log: {e}")
+        
+        # 产生新一代
+        if gen < NUM_GENERATIONS - 1:  # 最后一代不需要繁殖
+            population = evolution_engine.reproduce(population, current_generation=gen)
+
+    # 最终评估和保存
+    best_ind = evolution_engine.get_best_individual(population)
+    apply_genes_to_layers(best_ind.genes, list_lora_layers)
+    
+    # 最终测试
+    evaluate(clip_model, "ga_optimized", test_loader, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
+
+    # 保存最佳模型
+    if getattr(args, "save_path", None) is not None:
+        save_lora(args, list_lora_layers)
+
+    # 清理资源
+    parallel_evaluator.cleanup()
+    
+    return best_ind.fitness
+
+def _save_elites(self, args, population, list_lora_layers):
+    """保存精英个体"""
+    try:
+        num_elites_to_save = min(NUM_ELITES, len(population))
+        if num_elites_to_save > 0:
+            elites = sorted(
+                population,
+                key=lambda c: (c.fitness if c.fitness is not None else -float("inf")),
+                reverse=True,
+            )[:num_elites_to_save]
+
+            orig_filename = getattr(args, 'filename', None)
+
+            for rank, elite in enumerate(elites):
+                try:
+                    apply_genes_to_layers(elite.genes, list_lora_layers)
+                    suffix = f"elite{rank:02d}_acc{elite.fitness:.4f}"
+                    
+                    if orig_filename:
+                        args.filename = f"{orig_filename}_{suffix}"
+                    else:
+                        args.filename = f"lora_{suffix}"
+
+                    save_lora(args, list_lora_layers)
+                except Exception as e:
+                    print(f"[GA] Warning: failed to save elite {rank}: {e}")
+
+            # 恢复原始文件名
+            if orig_filename is not None:
+                args.filename = orig_filename
+            else:
+                try:
+                    delattr(args, 'filename')
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[GA] Warning: failed to save elites: {e}")

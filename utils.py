@@ -4,6 +4,7 @@ import clip
 from datasets.imagenet_a import ImageNetA
 from datasets.imagenet_r import ImageNetR
 from datasets.imagenetv2 import ImageNetV2
+from datasets.imagenet_sketch import ImageNetSketch
 
 def cls_acc(output, target, topk=1):
     pred = output.topk(topk, 1, True, True)[1].t()
@@ -174,8 +175,10 @@ def evaluate_loss(
 def evaluate_imagenet_variant(clip_model, variant_name, root_path):
     preprocess = _build_clip_preprocess()
 
-    if variant_name == 'imagenet-v2':
-        dataset_obj = ImageNetV2(preprocess=preprocess, root="/home/dingzijin/datasets/ImagenetV2/imagenetv2-matched-frequency-format-val")
+    if variant_name == 'imagenet-sketch':
+        dataset_obj = ImageNetSketch(preprocess=preprocess, location="/home/dingzijin/datasets")
+    elif variant_name == 'imagenet-v2':
+        dataset_obj = ImageNetV2(preprocess=preprocess, location="/home/dingzijin/datasets")
     elif variant_name == 'imagenet-a':
         dataset_obj = ImageNetA(preprocess=preprocess, location=root_path)
     elif variant_name == 'imagenet-r':
@@ -230,9 +233,9 @@ def evaluate(clip_model, opt, test_loader, dataset, eval_datasets, result_path, 
             exist = json.load(f)
     except Exception:
         exist = {}
-    # acc_test = evaluate_lora(clip_model, test_loader, dataset)
-    # print("**** Test accuracy: {:.2f}. ****\n".format(acc_test))
-    # exist.update({f'acc_test_seed{seed}': float(acc_test)})
+    acc_test = evaluate_lora(clip_model, test_loader, dataset)
+    print("**** Test accuracy: {:.2f}. ****\n".format(acc_test))
+    exist.update({f'acc_test_seed{seed}': float(acc_test)})
 
     if len(eval_datasets) > 0:
         try:
