@@ -9,8 +9,7 @@ from utils import *
 from loralib.utils import mark_only_lora_as_trainable, apply_lora, get_lora_parameters, lora_state_dict, save_lora, load_lora
 from loralib import layers as lora_layers
 
-
-def run_lora_adam(args, clip_model, logit_scale, dataset, train_loader, val_loader, test_loader, train_from_ga=True):
+def run_lora_adam(args, clip_model, logit_scale, dataset, train_from_ga=True):
     
     VALIDATION = True
   
@@ -18,14 +17,8 @@ def run_lora_adam(args, clip_model, logit_scale, dataset, train_loader, val_load
     if train_from_ga:
         args.opt = 'ga'
         load_lora(args, list_lora_layers)
-    
-    if args.eval_only:
-        load_lora(args, list_lora_layers)
-        clip_model = clip_model.cuda()
-        clip_model.eval()
-        evaluate(clip_model, 'adam', test_loader, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
-        return
 
+    torch.cuda.set_device(7)
     clip_model = clip_model.cuda()
     mark_only_lora_as_trainable(clip_model)
     total_iters = args.n_iters * args.shots
@@ -51,7 +44,7 @@ def run_lora_adam(args, clip_model, logit_scale, dataset, train_loader, val_load
         tot_samples = 0
         loss_epoch = 0.
 
-        for i, (images, target) in enumerate(tqdm(train_loader)):
+        for i, (images, target) in enumerate(tqdm(dataset.train_loader)):
             images, target = images.cuda(), target.cuda()
             if args.encoder == 'text' or args.encoder == 'both':
                 with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
@@ -94,11 +87,8 @@ def run_lora_adam(args, clip_model, logit_scale, dataset, train_loader, val_load
         # Eval
         if VALIDATION:
             clip_model.eval()
-            acc_val = evaluate_lora(clip_model, val_loader, dataset)
+            acc_val = evaluate_lora(clip_model, dataset.val_loader, dataset)
             print("**** Val accuracy: {:.2f}. ****\n".format(acc_val))
-        
-    
-    evaluate(clip_model, "adam", test_loader, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
     
     if args.save_path != None:
         save_lora(args, list_lora_layers)

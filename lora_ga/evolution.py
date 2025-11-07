@@ -5,9 +5,9 @@ import torch
 import numpy as np
 
 from .chromosome import Chromosome
-from utils.noise_table import SharedNoiseTable
-from utils.schedulers import MutationScheduler, AdaptiveMutationScheduler
-from config import *
+from .utils.noise_table import SharedNoiseTable
+from .utils.schedulers import MutationScheduler, AdaptiveMutationScheduler
+from .config import *
 
 class EvolutionEngine:
     """基于种子链的进化算法引擎"""

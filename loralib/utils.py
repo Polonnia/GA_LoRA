@@ -179,13 +179,13 @@ def save_lora(args, list_lora_layers):
     save_dir = f'{args.save_path}/{args.shots}shots/seed{args.seed}'
     os.makedirs(save_dir, exist_ok=True)
 
-    save_path = f'{save_dir}/{args.opt}_{args.filename}.pt'
+    save_path = f'{save_dir}/{args.opt}_{args.dataset}_{args.filename}.pt'
     torch.save(save_data, save_path)
     print(f'LoRA weights saved to {save_path}')
 
 
 def load_lora(args, list_lora_layers):
-    load_path = f'{args.save_path}/{args.shots}shots/seed{args.seed}/{args.opt}_{args.filename}.pt'
+    load_path = f'{args.save_path}/{args.shots}shots/seed{args.seed}/{args.opt}_{args.dataset}_{args.filename}.pt'
 
     if not os.path.exists(load_path):
         raise FileNotFoundError(f'File {load_path} does not exist.')

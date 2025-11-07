@@ -1,17 +1,24 @@
 import os
+import sys
 import json
 import time
 from typing import Optional
 import torch
+import random
 
-from core.evolution import EvolutionEngine
-from core.parallel import ParallelEvaluator
-from utils.noise_table import SharedNoiseTable
-from utils.evaluation import evaluate_lora, apply_genes_to_layers, precompute_text_features
-from config import *
-from ..loralib.utils import set_global_seed, apply_lora, save_lora, load_lora, evaluate
+from .evolution import EvolutionEngine
+from .parallel import ParallelEvaluator
+from .utils.noise_table import SharedNoiseTable
+from .utils.evaluation import evaluate_lora, apply_genes_to_layers, precompute_text_features
+from .config import *
+from loralib.utils import apply_lora, save_lora, load_lora
 
-def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_loader=None, gpu_id=0):
+def set_global_seed(seed: int = SEED):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+def run_lora_ga_parallel(args, clip_model, dataset, train_loader, val_loader=None, test_loader=None, gpu_id=0):
     """
     优化的LoRA GA主函数
     """
@@ -22,18 +29,12 @@ def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_l
     
     # 应用LoRA
     list_lora_layers = apply_lora(args, clip_model)
-    
-    if args.eval_only:
-        load_lora(args, list_lora_layers)
-        clip_model = clip_model.cuda().eval()
-        evaluate(clip_model, "ga", test_loader, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
-        return
 
     # 初始化优化组件
     noise_table = SharedNoiseTable(size=NOISE_TABLE_SIZE, seed=NOISE_SEED)
     evolution_engine = EvolutionEngine(
         noise_table=noise_table,
-        use_adaptive_mutation=True  # 使用自适应突变
+        use_adaptive_mutation=True
     )
     parallel_evaluator = ParallelEvaluator(clip_model, list_lora_layers)
     
@@ -107,9 +108,6 @@ def run_lora_ga(args, clip_model, dataset, train_loader, val_loader=None, test_l
     # 最终评估和保存
     best_ind = evolution_engine.get_best_individual(population)
     apply_genes_to_layers(best_ind.genes, list_lora_layers)
-    
-    # 最终测试
-    evaluate(clip_model, "ga_optimized", test_loader, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
 
     # 保存最佳模型
     if getattr(args, "save_path", None) is not None:
@@ -157,3 +155,4 @@ def _save_elites(self, args, population, list_lora_layers):
                     pass
     except Exception as e:
         print(f"[GA] Warning: failed to save elites: {e}")
+        

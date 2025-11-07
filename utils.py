@@ -42,7 +42,7 @@ def unwrap(model):
 def evaluate_lora(clip_model, loader, dataset, cached_text_features=None, cached_image_batches=None, cached_tokens=None):
     clip_model.eval()
     
-    # Ensure the model is on the correct device (use first model device)
+    # Ensure the model is on the correct device
     device = next(clip_model.parameters()).device
     
     # Prepare or reuse text features

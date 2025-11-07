@@ -6,7 +6,7 @@ from copy import deepcopy
 import math
 
 from .chromosome import Chromosome
-from utils.evaluation import evaluate_lora
+from .utils.evaluation import evaluate_lora
 
 class ParallelEvaluator:
     """并行评估器，基于参考代码的ConcurrentWorkers思想"""

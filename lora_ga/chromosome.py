@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from typing import List, Optional, Tuple, Any
 from copy import deepcopy
-
+import numpy as np
 class Chromosome:
     """
     基于种子链的染色体类

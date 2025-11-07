@@ -1,10 +1,10 @@
-from .main import run_lora_ga
-from .core.chromosome import Chromosome
-from .core.evolution import EvolutionEngine
-from .core.parallel import ParallelEvaluator
+from .main import run_lora_ga_parallel
+from .chromosome import Chromosome
+from .evolution import EvolutionEngine
+from .parallel import ParallelEvaluator
 
 __all__ = [
-    'run_lora_ga',
+    'run_lora_ga_parallel',
     'Chromosome',
     'EvolutionEngine',
     'ParallelEvaluator'

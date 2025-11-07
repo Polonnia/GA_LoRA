@@ -182,26 +182,20 @@ class ImageNet():
 
     dataset_dir = 'Imagenet'
 
-    def __init__(self, root, num_shots, preprocess, train_preprocess=None, test_preprocess=None):
+    def __init__(self, root, num_shots, preprocess, batch_size=32):
 
         self.dataset_dir = os.path.join(root, self.dataset_dir)
-        self.image_dir = os.path.join(self.dataset_dir, 'images')
         
-        if train_preprocess is None:
-            # train_preprocess = transforms.Compose([
-            #                                         transforms.RandomResizedCrop(size=224, scale=(0.08, 1), interpolation=transforms.InterpolationMode.BICUBIC),
-            #                                         transforms.RandomHorizontalFlip(p=0.5),
-            #                                         transforms.ToTensor(),
-            #                                         transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711))
-            #                                     ])
-
-            train_preprocess = preprocess
-        if test_preprocess is None:
-            test_preprocess = preprocess
+        # train_preprocess = transforms.Compose([
+        #                                         transforms.RandomResizedCrop(size=224, scale=(0.08, 1), interpolation=transforms.InterpolationMode.BICUBIC),
+        #                                         transforms.RandomHorizontalFlip(p=0.5),
+        #                                         transforms.ToTensor(),
+        #                                         transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711))
+        #                                     ])
         
-        self.train_x = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'train')), transform=train_preprocess)
+        self.train_x = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'train')), transform=preprocess)
         self.val = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'train')), transform=preprocess)
-        self.test = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'val')), transform=test_preprocess)
+        self.test = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'val')), transform=preprocess)
         
         if num_shots == -1:
             num_shots_val = 4  # Use 4 samples per class for validation when using all training data
@@ -243,3 +237,7 @@ class ImageNet():
         self.val.imgs = imgs_val
         self.val.targets = targets_val
         self.val.samples = imgs_val
+        
+        self.train_loader = torch.utils.data.DataLoader(self.train_x, batch_size=batch_size, num_workers=8, shuffle=True, pin_memory=True)
+        self.val_loader = torch.utils.data.DataLoader(self.val, batch_size=batch_size, num_workers=8, shuffle=False, pin_memory=True)
+        self.test_loader = torch.utils.data.DataLoader(self.test, batch_size=batch_size, num_workers=8, shuffle=False, pin_memory=True)
