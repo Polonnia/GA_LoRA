@@ -5,6 +5,7 @@ from datasets.imagenet_a import ImageNetA
 from datasets.imagenet_r import ImageNetR
 from datasets.imagenetv2 import ImageNetV2
 from datasets.imagenet_sketch import ImageNetSketch
+from datasets.imagenet import ImageNet
 
 def cls_acc(output, target, topk=1):
     pred = output.topk(topk, 1, True, True)[1].t()
@@ -52,7 +53,7 @@ def evaluate_lora(clip_model, loader, dataset, cached_text_features=None, cached
         if cached_tokens is not None:
             texts = cached_tokens.to(device)  # Ensure tokens are on the correct device
         else:
-            template = dataset.template[0]
+            template = "a photo of a {}."
             texts = [template.format(classname.replace('_', ' ')) for classname in dataset.classnames]
             with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
                 texts = clip.tokenize(texts).to(device)  # Move tokens to the correct device
@@ -176,13 +177,15 @@ def evaluate_imagenet_variant(clip_model, variant_name, root_path):
     preprocess = _build_clip_preprocess()
 
     if variant_name == 'imagenet-sketch':
-        dataset_obj = ImageNetSketch(preprocess=preprocess, location="/home/dingzijin/datasets")
+        dataset_obj = ImageNetSketch(preprocess=preprocess, root="/home/dingzijin/datasets")
     elif variant_name == 'imagenet-v2':
-        dataset_obj = ImageNetV2(preprocess=preprocess, location="/home/dingzijin/datasets")
+        dataset_obj = ImageNetV2(preprocess=preprocess, root="/home/dingzijin/datasets")
     elif variant_name == 'imagenet-a':
-        dataset_obj = ImageNetA(preprocess=preprocess, location=root_path)
+        dataset_obj = ImageNetA(preprocess=preprocess, root=root_path)
     elif variant_name == 'imagenet-r':
-        dataset_obj = ImageNetR(preprocess=preprocess, location=root_path)
+        dataset_obj = ImageNetR(preprocess=preprocess, root=root_path)
+    elif variant_name == 'imagenet':
+        dataset_obj = ImageNet(preprocess=preprocess, root=root_path)
     else:
         raise ValueError(f'Unknown variant {variant_name}')
 
@@ -237,17 +240,20 @@ def evaluate(clip_model, opt, test_loader, dataset, eval_datasets, result_path, 
     print("**** Test accuracy: {:.2f}. ****\n".format(acc_test))
     exist.update({f'acc_test_seed{seed}': float(acc_test)})
 
+    tot_acc = 0
     if len(eval_datasets) > 0:
         try:
             for v in eval_datasets:
                 print(f"Evaluating {v}...")
                 v_acc = evaluate_imagenet_variant(clip_model, v, root_path)
+                tot_acc += v_acc
                 print(f"**** {v} accuracy: {v_acc:.2f}. ****")
                 
                 exist.update({f'acc_{v}_seed{seed}': float(v_acc)})
         except Exception as e:
             print(f"Warning: failed evaluating variants {eval_datasets}: {e}")
-    
+    avg_acc = tot_acc / len(eval_datasets) if len(eval_datasets) > 0 else 0.0
+    exist.update({f'avg_acc_variants_seed{seed}': float(avg_acc)})
     # Save results
     with open(result_json_path, 'w') as f:
         json.dump(exist, f, indent=2)

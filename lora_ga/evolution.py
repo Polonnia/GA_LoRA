@@ -8,6 +8,7 @@ from .chromosome import Chromosome
 from .utils.noise_table import SharedNoiseTable
 from .utils.schedulers import MutationScheduler, AdaptiveMutationScheduler
 from .config import *
+from copy import deepcopy
 
 class EvolutionEngine:
     """基于种子链的进化算法引擎"""
@@ -35,7 +36,8 @@ class EvolutionEngine:
             )
         
         self.use_adaptive_mutation = use_adaptive_mutation
-    
+        
+
     def initialize_population(self, list_lora_layers: List[torch.nn.Module], 
                             pop_size: int = POPULATION_SIZE) -> List[Chromosome]:
         """初始化基于种子链的种群"""
@@ -48,8 +50,7 @@ class EvolutionEngine:
             base_chrom.seeds = (base_seed,)
             
             # 计算并设置基础权重
-            base_weights = base_chrom.compute_weights_from_seeds(self.noise_table)
-            base_chrom.apply_weights_to_genes(base_weights)
+            base_weights = self._compute_weights_from_seeds(base_chrom.seeds, base_chrom.num_params)
             self.weight_cache[base_chrom.seeds] = base_weights
             
         population.append(base_chrom)
@@ -63,8 +64,7 @@ class EvolutionEngine:
                 chrom.seeds = base_chrom.seeds + ((mutation_idx, STD_DEV),)
                 
                 # 计算突变后的权重
-                mutated_weights = chrom.compute_weights_from_seeds(self.noise_table, self.weight_cache)
-                chrom.apply_weights_to_genes(mutated_weights)
+                mutated_weights = self._compute_weights_from_seeds(chrom.seeds, chrom.num_params)
                 self.weight_cache[chrom.seeds] = mutated_weights
                 
             population.append(chrom)
@@ -86,99 +86,13 @@ class EvolutionEngine:
             mutated.seeds = mutated.seeds + ((mutation_idx, mutation_power),)
         else:
             mutated.seeds = (mutation_idx, mutation_power)
-        
-        # 计算突变后的权重
-        try:
-            mutated_weights = mutated.compute_weights_from_seeds(self.noise_table, self.weight_cache)
-            mutated.apply_weights_to_genes(mutated_weights)
-            self.weight_cache[mutated.seeds] = mutated_weights
-        except Exception as e:
-            print(f"Warning: Mutation failed: {e}")
-            # 回退到传统突变
-            mutated = self._fallback_mutate(chromosome, mutation_power)
             
         mutated.need_update = True
         mutated.fitness = None
         return mutated
     
-    def _fallback_mutate(self, chromosome: Chromosome, mutation_power: float) -> Chromosome:
-        """传统的突变方法（备用）"""
-        mutated = chromosome.clone()
-        for i, gene in enumerate(mutated.genes):
-            if random.random() < MUTATION_RATIO:
-                noise = torch.randn_like(gene) * mutation_power
-                mutated.genes[i] += noise
-        
-        # 生成新的种子链
-        mutation_idx = self.noise_table.sample_index(chromosome.num_params)
-        if chromosome.seeds:
-            mutated.seeds = chromosome.seeds + ((mutation_idx, mutation_power),)
-        else:
-            mutated.seeds = (mutation_idx, mutation_power)
-            
-        mutated.need_update = True
-        return mutated
     
-    def crossover(self, parent1: Chromosome, parent2: Chromosome) -> Chromosome:
-        """基于种子链的交叉操作 - 选择父母之一的种子链"""
-        child = Chromosome()
-        child.enabled_lora = parent1.enabled_lora[:]
-        
-        # 随机选择父母的种子链
-        if random.random() < 0.5:
-            child.seeds = deepcopy(parent1.seeds)
-        else:
-            child.seeds = deepcopy(parent2.seeds)
-        
-        # 重新计算权重
-        if child.seeds and child.num_params > 0:
-            try:
-                child_weights = child.compute_weights_from_seeds(self.noise_table, self.weight_cache)
-                # 需要先初始化基因
-                child.genes = [torch.zeros_like(g) for g in parent1.genes]
-                child.apply_weights_to_genes(child_weights)
-                self.weight_cache[child.seeds] = child_weights
-            except Exception as e:
-                print(f"Warning: Crossover weight computation failed: {e}")
-                # 回退到传统交叉
-                child = self._fallback_crossover(parent1, parent2)
-        else:
-            child = self._fallback_crossover(parent1, parent2)
-            
-        child.need_update = True
-        return child
-    
-    def _fallback_crossover(self, parent1: Chromosome, parent2: Chromosome) -> Chromosome:
-        """传统的交叉方法（备用）"""
-        child = Chromosome()
-        child.enabled_lora = parent1.enabled_lora[:]
-        child.genes = []
-        
-        # 块状交叉
-        num_layers = len(parent1.genes) // (2 * len(parent1.enabled_lora))
-        
-        for layer_idx in range(num_layers):
-            if random.random() < 0.5:
-                source_parent = parent1
-            else:
-                source_parent = parent2
-            
-            start_idx = layer_idx * 2 * len(parent1.enabled_lora)
-            end_idx = start_idx + 2 * len(parent1.enabled_lora)
-            
-            for i in range(start_idx, end_idx):
-                child.genes.append(source_parent.genes[i].clone())
-        
-        # 随机选择父母的种子链
-        if random.random() < 0.5 and parent1.seeds:
-            child.seeds = deepcopy(parent1.seeds)
-        elif parent2.seeds:
-            child.seeds = deepcopy(parent2.seeds)
-            
-        child.need_update = True
-        return child
-    
-    def reproduce_seed_based(self, population: List[Chromosome], 
+    def reproduce(self, population: List[Chromosome], 
                            num_elites: int = NUM_ELITES,
                            num_parents: int = NUM_PARENTS,
                            current_generation: int = 0) -> List[Chromosome]:
@@ -215,55 +129,6 @@ class EvolutionEngine:
         while len(new_population) < pop_size:
             parent = random.choice(mating_pool)
             child = self.mutate(parent, mutation_power)
-            new_population.append(child)
-        
-        return new_population
-    
-    def reproduce_hybrid(self, population: List[Chromosome], 
-                        num_elites: int = NUM_ELITES,
-                        num_parents: int = NUM_PARENTS,
-                        current_generation: int = 0) -> List[Chromosome]:
-        """混合繁殖策略"""
-        pop_size = len(population)
-        ranked = sorted(
-            population,
-            key=lambda c: (c.fitness if c.fitness is not None else -float("inf")),
-            reverse=True,
-        )
-        
-        # 获取突变强度
-        if self.use_adaptive_mutation:
-            best_fitness = ranked[0].fitness if ranked[0].fitness is not None else 0.0
-            mutation_power = self.mutation_scheduler.update(best_fitness)
-        else:
-            mutation_power = self.mutation_scheduler.get_power(
-                current_generation, current_generation * pop_size
-            )
-        
-        # 精英保留
-        new_population = []
-        keep = min(num_elites, pop_size)
-        for i in range(keep):
-            ranked[i].need_update = False
-            new_population.append(ranked[i])
-        
-        # 父母池
-        mating_pool = ranked[:num_parents]
-        
-        # 自适应繁殖策略
-        exploration_ratio = max(0.2, 1.0 - current_generation / NUM_GENERATIONS)
-        
-        while len(new_population) < pop_size:
-            if random.random() < exploration_ratio:
-                # 探索：基于种子链的突变
-                parent = random.choice(mating_pool)
-                child = self.mutate(parent, mutation_power)
-            else:
-                # 利用：交叉
-                p = random.sample(mating_pool, 1)
-                # 对交叉结果进行轻微突变
-                child = self.mutate(p, mutation_power * 0.1, mutation_rate=0.5)
-            
             new_population.append(child)
         
         return new_population
@@ -308,3 +173,54 @@ class EvolutionEngine:
     def clear_cache(self):
         """清理权重缓存"""
         self.weight_cache.clear()
+        
+    
+    def _compute_weights_from_seeds(self, seeds: Tuple, num_params: int) -> np.ndarray:
+        """基于种子链计算权重"""
+        if seeds is None or len(seeds) == 0:
+            raise ValueError("No seeds available for weight computation")
+        
+        # 检查缓存
+        if seeds in self.weight_cache:
+            return self.weight_cache[seeds]
+        
+        # 从基础种子开始
+        base_seed = seeds[0]
+        if isinstance(base_seed, tuple):
+            # 基础种子本身也是一个突变链
+            theta = self._compute_from_seed_chain(base_seed, num_params)
+        else:
+            # 单个基础种子
+            theta = self.noise_table.get(base_seed, num_params).copy()
+        
+        # 应用后续突变
+        for mutation in seeds[1:]:
+            if isinstance(mutation, tuple) and len(mutation) == 2:
+                idx, power = mutation
+                mutation_noise = self.noise_table.get(idx, num_params)
+                theta = theta + power * mutation_noise
+            else:
+                # 处理旧的种子格式
+                idx = mutation
+                mutation_noise = self.noise_table.get(idx, num_params)
+                theta = theta + 0.005 * mutation_noise
+        
+        # 缓存结果
+        self.weight_cache[seeds] = theta
+        return theta
+
+    def _compute_from_seed_chain(self, seed_chain, num_params: int) -> np.ndarray:
+        """递归计算种子链的权重"""
+        if isinstance(seed_chain, tuple) and len(seed_chain) > 1:
+            # 递归处理嵌套的种子链
+            base_theta = self._compute_from_seed_chain(seed_chain[0], num_params)
+            for mutation in seed_chain[1:]:
+                if isinstance(mutation, tuple) and len(mutation) == 2:
+                    idx, power = mutation
+                    mutation_noise = self.noise_table.get(idx, num_params)
+                    base_theta = base_theta + power * mutation_noise
+            return base_theta
+        else:
+            # 基础种子
+            return self.noise_table.get(seed_chain, num_params).copy()
+        

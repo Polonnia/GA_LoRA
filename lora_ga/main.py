@@ -5,6 +5,7 @@ import time
 from typing import Optional
 import torch
 import random
+import multiprocessing as mp
 
 from .evolution import EvolutionEngine
 from .parallel import ParallelEvaluator
@@ -18,10 +19,14 @@ def set_global_seed(seed: int = SEED):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-def run_lora_ga_parallel(args, clip_model, dataset, train_loader, val_loader=None, test_loader=None, gpu_id=0):
+def run_lora_ga_parallel(args, clip_model, dataset, gpu_id=0):
     """
     优化的LoRA GA主函数
     """
+    
+    if mp.get_start_method(allow_none=True) != 'spawn':
+        mp.set_start_method('spawn', force=True)
+    args.gpu_ids = [1,4,5]
     set_global_seed(args.seed)
     torch.cuda.set_device(gpu_id)
 
@@ -29,6 +34,21 @@ def run_lora_ga_parallel(args, clip_model, dataset, train_loader, val_loader=Non
     
     # 应用LoRA
     list_lora_layers = apply_lora(args, clip_model)
+    
+    if hasattr(args, 'gpu_ids') and args.gpu_ids:
+        # 从参数中获取GPU ID列表
+        if isinstance(args.gpu_ids, str):
+            gpu_ids = [int(x.strip()) for x in args.gpu_ids.split(',')]
+        else:
+            gpu_ids = args.gpu_ids
+    else:
+        # 默认使用所有可用GPU
+        if torch.cuda.is_available():
+            gpu_ids = list(range(torch.cuda.device_count()))
+        else:
+            gpu_ids = []
+    
+    print(f"[MAIN] 将使用GPU: {gpu_ids}")
 
     # 初始化优化组件
     noise_table = SharedNoiseTable(size=NOISE_TABLE_SIZE, seed=NOISE_SEED)
@@ -36,7 +56,17 @@ def run_lora_ga_parallel(args, clip_model, dataset, train_loader, val_loader=Non
         noise_table=noise_table,
         use_adaptive_mutation=True
     )
-    parallel_evaluator = ParallelEvaluator(clip_model, list_lora_layers)
+    parallel_evaluator = ParallelEvaluator(
+        base_model=clip_model,
+        list_lora_layers=list_lora_layers,
+        noise_table=noise_table,  # 传递噪声表
+        gpu_ids=[1,4,5],
+        processes_per_gpu=8,
+        debug=True
+    )
+    
+    stats = parallel_evaluator.get_stats()
+    print(f"[MAIN] 并行评估器初始化完成: {stats}")
     
     # 预计算特征
     if args.encoder == "vision":
@@ -60,7 +90,7 @@ def run_lora_ga_parallel(args, clip_model, dataset, train_loader, val_loader=Non
         
         # 并行评估种群
         parallel_evaluator.evaluate_population_parallel(
-            population, train_loader, dataset, text_features
+            population, dataset.train_loader, dataset, text_features
         )
         
         # 获取统计信息
@@ -68,10 +98,10 @@ def run_lora_ga_parallel(args, clip_model, dataset, train_loader, val_loader=Non
         best_ind = evolution_engine.get_best_individual(population)
         
         # 验证集评估
-        if val_loader is not None:
+        if dataset.val_loader is not None:
             apply_genes_to_layers(best_ind.genes, list_lora_layers)
             val_acc = evaluate_lora(
-                clip_model, val_loader, dataset, cached_text_features=text_features
+                clip_model, dataset.val_loader, dataset, cached_text_features=text_features
             )
             save_lora(args, list_lora_layers)
         else:

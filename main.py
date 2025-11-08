@@ -70,6 +70,8 @@ def main():
         clip_model.eval()
         logit_scale = 100
 
+        if args.dataset == 'imagenet-sketch' or args.dataset == 'imagenet-v2':
+            args.root_path = '/home/dingzijin/datasets'
         print(f"Preparing dataset (shots={s}).")
         dataset = build_dataset(args.dataset, args.root_path, args.shots, preprocess, args.batch_size)
         
@@ -107,7 +109,7 @@ def main():
             run_lora_adam(args, clip_model, logit_scale, dataset, train_from_ga=False)
         elif args.opt == 'ga':
             print("Running LoRA with GA optimization")
-            run_lora_ga_parallel(args, clip_model, dataset, gpu_id=2)
+            run_lora_ga_parallel(args, clip_model, dataset, gpu_id=4)
         else:
             raise ValueError("Unknown optimization method specified. Use 'adam' or 'ga'.")
         evaluate(clip_model, args.opt, dataset.test_loader, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)

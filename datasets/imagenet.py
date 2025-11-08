@@ -179,31 +179,40 @@ imagenet_classes = ["tench", "goldfish", "great white shark", "tiger shark", "ha
 imagenet_templates = ["a photo of a {}."]
 
 class ImageNet():
-
     dataset_dir = 'Imagenet'
 
-    def __init__(self, root, num_shots, preprocess, batch_size=32):
-
+    def __init__(self, root, num_shots=0, preprocess=None, batch_size=32):
         self.dataset_dir = os.path.join(root, self.dataset_dir)
-        
-        # train_preprocess = transforms.Compose([
-        #                                         transforms.RandomResizedCrop(size=224, scale=(0.08, 1), interpolation=transforms.InterpolationMode.BICUBIC),
-        #                                         transforms.RandomHorizontalFlip(p=0.5),
-        #                                         transforms.ToTensor(),
-        #                                         transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711))
-        #                                     ])
         
         self.train_x = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'train')), transform=preprocess)
         self.val = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'train')), transform=preprocess)
         self.test = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'val')), transform=preprocess)
         
-        if num_shots == -1:
-            num_shots_val = 4  # Use 4 samples per class for validation when using all training data
-        else:
-            num_shots_val = min(4, num_shots)
-        
         self.template = imagenet_templates
         self.classnames = imagenet_classes
+
+        if num_shots == 0:
+            # Zero-shot: only use test set, no training or validation
+            self.train_loader = None
+            self.val_loader = None
+            # Use the original test set as is
+            self.test_loader = torch.utils.data.DataLoader(
+                self.test, 
+                batch_size=batch_size, 
+                num_workers=8, 
+                shuffle=False, 
+                pin_memory=True
+            )
+            
+            print(f"ImageNet Dataset Statistics (shots={num_shots}):")
+            print(f"  Test: {len(self.test.imgs)} samples")
+            return
+        
+        # For num_shots > 0, proceed with normal few-shot split
+        if num_shots == -1:
+            num_shots_val = 4
+        else:
+            num_shots_val = min(4, num_shots)
 
         split_by_label_dict = defaultdict(list)
         for i in range(len(self.train_x.imgs)):
@@ -214,16 +223,30 @@ class ImageNet():
         targets_val = []
         
         for label, items in split_by_label_dict.items():
+            available_samples = len(items)
+            
             if num_shots == -1:
                 # Use all training data
                 samples = items
-                # Use a small subset for validation (max 4 per class)
                 val_samples = random.sample(items, min(num_shots_val, len(items)))
             else:
-                # Use few-shot sampling
-                samples = random.sample(items, num_shots + num_shots_val)
-                val_samples = samples[num_shots:num_shots+num_shots_val]
-                samples = samples[0:num_shots]
+                # Few-shot setting
+                total_needed = num_shots + num_shots_val
+                if available_samples < total_needed:
+                    actual_train_shots = min(num_shots, available_samples)
+                    actual_val_shots = min(num_shots_val, available_samples - actual_train_shots)
+                    
+                    if available_samples > 0:
+                        all_samples = random.sample(items, available_samples)
+                        samples = all_samples[:actual_train_shots]
+                        val_samples = all_samples[actual_train_shots:actual_train_shots + actual_val_shots]
+                    else:
+                        samples = []
+                        val_samples = []
+                else:
+                    all_samples = random.sample(items, total_needed)
+                    samples = all_samples[:num_shots]
+                    val_samples = all_samples[num_shots:num_shots + num_shots_val]
             
             imgs = imgs + samples
             imgs_val = imgs_val + val_samples
@@ -238,6 +261,32 @@ class ImageNet():
         self.val.targets = targets_val
         self.val.samples = imgs_val
         
-        self.train_loader = torch.utils.data.DataLoader(self.train_x, batch_size=batch_size, num_workers=8, shuffle=True, pin_memory=True)
-        self.val_loader = torch.utils.data.DataLoader(self.val, batch_size=batch_size, num_workers=8, shuffle=False, pin_memory=True)
-        self.test_loader = torch.utils.data.DataLoader(self.test, batch_size=batch_size, num_workers=8, shuffle=False, pin_memory=True)
+        self.train_loader = torch.utils.data.DataLoader(
+            self.train_x, 
+            batch_size=batch_size, 
+            num_workers=8, 
+            shuffle=True, 
+            pin_memory=True
+        )
+        self.val_loader = torch.utils.data.DataLoader(
+            self.val, 
+            batch_size=batch_size, 
+            num_workers=8, 
+            shuffle=False, 
+            pin_memory=True
+        )
+        self.test_loader = torch.utils.data.DataLoader(
+            self.test, 
+            batch_size=batch_size, 
+            num_workers=8, 
+            shuffle=False, 
+            pin_memory=True
+        )
+        
+        print(f"ImageNet Dataset Statistics (shots={num_shots}):")
+        print(f"  Train: {len(imgs)} samples")
+        print(f"  Val: {len(imgs_val)} samples")
+        print(f"  Test: {len(self.test.imgs)} samples")
+
+    def name(self):
+        return 'imagenet'
