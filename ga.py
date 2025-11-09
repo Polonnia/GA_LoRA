@@ -23,8 +23,8 @@ import clip  # OpenAI CLIP tokenizer
 # ------------------------------
 # 全局参数（可按需修改）
 # ------------------------------
-POPULATION_SIZE = 100
-NUM_GENERATIONS = 4000
+POPULATION_SIZE = 2000
+NUM_GENERATIONS = 500
 MUTATION_RATE = 0.30
 MUTATION_RATIO = 0.20
 NUM_ELITES = 10

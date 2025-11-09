@@ -25,7 +25,12 @@ def evaluate_lora(clip_model: nn.Module, loader, dataset,
         if cached_tokens is not None:
             texts = cached_tokens.to(device)
         else:
-            template = dataset.template[0]
+            # Handle datasets with or without template attribute
+            if hasattr(dataset, 'template') and dataset.template is not None:
+                template = dataset.template[0] if isinstance(dataset.template, (list, tuple)) else dataset.template
+            else:
+                # Default template for ImageNet and similar datasets
+                template = "a photo of a {}."
             texts = [template.format(classname.replace('_', ' ')) for classname in dataset.classnames]
             texts = clip.tokenize(texts).to(device)
         
@@ -73,7 +78,12 @@ def evaluate_lora(clip_model: nn.Module, loader, dataset,
 def precompute_text_features(clip_model: nn.Module, dataset, batch_size: int = 32) -> torch.Tensor:
     """预计算文本特征"""
     device = next(clip_model.parameters()).device
-    template = dataset.template[0]
+    # Handle datasets with or without template attribute
+    if hasattr(dataset, 'template') and dataset.template is not None:
+        template = dataset.template[0] if isinstance(dataset.template, (list, tuple)) else dataset.template
+    else:
+        # Default template for ImageNet and similar datasets
+        template = "a photo of a {}."
     texts = [template.format(classname.replace("_", " ")) for classname in dataset.classnames]
     
     torch.cuda.empty_cache()

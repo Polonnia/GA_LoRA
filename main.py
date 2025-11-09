@@ -70,10 +70,13 @@ def main():
         clip_model.eval()
         logit_scale = 100
 
-        if args.dataset == 'imagenet-sketch' or args.dataset == 'imagenet-v2':
-            args.root_path = '/home/dingzijin/datasets'
         print(f"Preparing dataset (shots={s}).")
-        dataset = build_dataset(args.dataset, args.root_path, args.shots, preprocess, args.batch_size)
+        if args.dataset == 'imagenet-sketch' or args.dataset == 'imagenet-v2':
+            root_path = '/home/dingzijin/datasets'
+            dataset = build_dataset(args.dataset, root_path, args.shots, preprocess, args.batch_size)
+        
+        else:
+            dataset = build_dataset(args.dataset, args.root_path, args.shots, preprocess, args.batch_size)
         
         # if args.dataset == 'imagenet':
         #     val_loader = torch.utils.data.DataLoader(dataset.val, batch_size=args.eval_batch_size, num_workers=8, shuffle=False, pin_memory=True)
@@ -102,7 +105,7 @@ def main():
             clip_model = clip_model.cuda()
             clip_model.eval()
             evaluate(clip_model, args.opt, dataset.test_loader, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
-            return
+            continue
         
         if args.opt == 'adam':
             print("Running LoRA with AdamW optimization")

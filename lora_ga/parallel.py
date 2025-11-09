@@ -24,7 +24,7 @@ class GPUWorkerProcess:
     
     def __init__(self, worker_id: int, gpu_id: int, base_model: nn.Module, 
                  lora_layers: List[nn.Module], noise_table: SharedNoiseTable,
-                 debug: bool = True):
+                 dataset=None, classnames=None, template=None, debug: bool = True):
         """
         Initialize GPU Worker Process.
         
@@ -34,12 +34,17 @@ class GPUWorkerProcess:
             base_model: Base model architecture to copy
             lora_layers: Original LoRA layers to copy
             noise_table: Shared noise table for seed-based weight reconstruction
+            dataset: Dataset object with train_loader (optional, used to create train_loader in worker)
+            classnames: List of class names for evaluation
+            template: Template string for text prompts
             debug: Enable debug logging
         """
         self.worker_id = worker_id
         self.gpu_id = gpu_id
         self.noise_table = noise_table
         self.debug = debug
+        self.classnames = classnames
+        self.template = template
         
         # Set device for this worker
         self.device = torch.device(f'cuda:{gpu_id}')
@@ -50,6 +55,30 @@ class GPUWorkerProcess:
         
         # Process-local weight cache for seed-based reconstruction
         self.weight_cache = {}
+        
+        # 🚀 性能优化：在worker初始化时创建并缓存train_loader
+        self.train_loader = None
+        if dataset is not None:
+            if hasattr(dataset, 'train_loader') and dataset.train_loader is not None:
+                # 直接使用dataset的train_loader（如果可访问）
+                self.train_loader = dataset.train_loader
+                self._log_debug(f"Using dataset.train_loader directly")
+            elif hasattr(dataset, 'train_dataset') and dataset.train_dataset is not None:
+                # 从train_dataset创建新的DataLoader
+                from torch.utils.data import DataLoader
+                self.train_loader = DataLoader(
+                    dataset.train_dataset,
+                    batch_size=getattr(dataset.train_loader, 'batch_size', 32) if hasattr(dataset, 'train_loader') else 32,
+                    shuffle=False,  # 评估时不需要shuffle
+                    num_workers=0,  # 必须在子进程中为0
+                    pin_memory=True
+                )
+                self._log_debug(f"Created train_loader from train_dataset")
+        
+        if self.train_loader is not None:
+            self._log_debug(f"Train loader cached in worker {worker_id}")
+        else:
+            self._log_debug(f"Warning: Train loader not available in worker {worker_id}")
         
         self._log_debug(f"GPUWorkerProcess {worker_id} initialized on {self.device}")
     
@@ -68,43 +97,74 @@ class GPUWorkerProcess:
             process_name = mp.current_process().name
             print(f"[DEBUG GPUWorkerProcess{self.worker_id} {timestamp} {process_name}] {message}")
     
-    def evaluate_single(self, chromosome: Chromosome, dataset, 
-                   cached_text_features: Optional[torch.Tensor] = None,
-                   data_loader_kwargs: Optional[Dict] = None) -> float:
+    
+    def evaluate_single(self, chromosome: Chromosome,
+                   cached_text_features: Optional[torch.Tensor] = None) -> float:
         """
         Evaluate a single chromosome using seed-based weight reconstruction.
+        
+        🚀 性能优化：使用worker初始化时缓存的train_loader，无需传递
+        
+        Args:
+            chromosome: Chromosome to evaluate
+            cached_text_features: Pre-computed text features
         """
-        self._log_debug(f"Evaluating chromosome with {len(chromosome.seeds) if chromosome.seeds else 0} seeds")
+        # 🐛 调试：打印chromosome的seeds信息
+        seeds_info = "None"
+        if chromosome.seeds:
+            if len(chromosome.seeds) > 0:
+                base_seed = chromosome.seeds[0]
+                seeds_info = f"base={base_seed}, mutations={len(chromosome.seeds)-1}"
+                if len(chromosome.seeds) > 1:
+                    # 显示前几个mutation
+                    mutations_preview = chromosome.seeds[1:min(4, len(chromosome.seeds))]
+                    seeds_info += f", preview={mutations_preview}"
+        
+        self._log_debug(f"Evaluating chromosome - seeds: {seeds_info}, num_params: {chromosome.num_params}")
         eval_start_time = time.time()
         
         try:
             # 🎯 SEED-BASED: Reconstruct weights from seeds and apply to LoRA layers
             apply_start = time.time()
+            
+            # 🐛 调试：检查应用权重前的模型权重（采样第一个LoRA层的第一个权重）
+            weight_before = None
+            if self.lora_layers and len(self.lora_layers) > 0:
+                first_layer = self.lora_layers[0]
+                if hasattr(first_layer, "q_proj") and hasattr(first_layer.q_proj, "w_lora_A"):
+                    weight_before = first_layer.q_proj.w_lora_A[0, 0].item()
+            
             self._apply_seeds_to_layers(chromosome)
             apply_time = time.time() - apply_start
             
-            # 🎯 修复：创建数据加载器
-            from torch.utils.data import DataLoader
-            local_data_loader_kwargs = data_loader_kwargs or {}
+            # 🐛 调试：检查应用权重后的模型权重
+            weight_after = None
+            if self.lora_layers and len(self.lora_layers) > 0:
+                first_layer = self.lora_layers[0]
+                if hasattr(first_layer, "q_proj") and hasattr(first_layer.q_proj, "w_lora_A"):
+                    weight_after = first_layer.q_proj.w_lora_A[0, 0].item()
             
-            # 确保每个进程有不同的随机种子
-            import random
-            random_seed = random.randint(0, 1000000)
+            if weight_before is not None and weight_after is not None:
+                weight_changed = abs(weight_before - weight_after) > 1e-6
+                self._log_debug(f"Weight change check - before: {weight_before:.6f}, after: {weight_after:.6f}, changed: {weight_changed}")
+            else:
+                self._log_debug(f"Warning: Could not check weight change (before={weight_before}, after={weight_after})")
             
-            # 创建独立的数据加载器
-            train_loader = DataLoader(
-                dataset,
-                batch_size=local_data_loader_kwargs.get('batch_size', 32),
-                shuffle=local_data_loader_kwargs.get('shuffle', True),
-                num_workers=local_data_loader_kwargs.get('num_workers', 0),  # 在子进程中设为0
-                pin_memory=local_data_loader_kwargs.get('pin_memory', True)
-            )
+            # 使用worker缓存的train_loader
+            if self.train_loader is None:
+                raise RuntimeError("Train loader not available in worker. Please provide dataset during worker initialization.")
             
-            # 设置不同的随机状态
-            if hasattr(train_loader.sampler, 'generator'):
-                train_loader.sampler.generator = torch.Generator().manual_seed(random_seed)
+            # 使用worker保存的classnames和template
+            if self.classnames is None:
+                raise RuntimeError("Classnames not provided in worker.")
             
-            self._log_debug(f"Created independent data loader with seed {random_seed}")
+            # 创建轻量级dataset包装器用于evaluate_lora
+            class DatasetWrapper:
+                def __init__(self, classnames, template):
+                    self.classnames = classnames
+                    self.template = template
+            
+            dataset_wrapper = DatasetWrapper(self.classnames, self.template)
             
             # Prepare features if provided
             local_text_features = None
@@ -114,11 +174,10 @@ class GPUWorkerProcess:
             # Evaluate fitness using process-specific model
             eval_start = time.time()
             
-            # 🎯 修复：正确调用 evaluate_lora，传递数据加载器
             fitness = evaluate_lora(
                 self.model, 
-                train_loader,  # 传递数据加载器，不是数据集
-                dataset,       # 传递数据集用于模板和类别名称
+                self.train_loader,  # 使用缓存的train_loader
+                dataset_wrapper,  # 轻量级dataset包装器
                 cached_text_features=local_text_features
             )
             
@@ -154,11 +213,16 @@ class GPUWorkerProcess:
         """Compute weights from chromosome's seed chain using shared noise table."""
         # Check local cache first
         cache_key = chromosome.seeds
-        if cache_key in self.weight_cache:
+        cache_hit = cache_key in self.weight_cache
+        if cache_hit:
+            self._log_debug(f"Cache hit for seeds: {cache_key[:2] if len(cache_key) > 2 else cache_key}")
             return self.weight_cache[cache_key].copy()
         
         if chromosome.seeds is None or len(chromosome.seeds) == 0:
             raise ValueError("No seeds available for weight computation")
+        
+        # 🐛 调试：记录权重重建过程
+        self._log_debug(f"Computing weights from seeds (cache miss) - base_seed: {chromosome.seeds[0]}, num_mutations: {len(chromosome.seeds)-1}")
         
         # Start with base seed
         base_seed = chromosome.seeds[0]
@@ -169,12 +233,16 @@ class GPUWorkerProcess:
             # Single base seed
             theta = self.noise_table.get(base_seed, chromosome.num_params).copy()
         
+        # 🐛 调试：记录基础权重的统计信息
+        self._log_debug(f"Base weights - mean: {theta.mean():.6f}, std: {theta.std():.6f}, min: {theta.min():.6f}, max: {theta.max():.6f}")
+        
         # Apply subsequent mutations
-        for mutation in chromosome.seeds[1:]:
+        for i, mutation in enumerate(chromosome.seeds[1:]):
             if isinstance(mutation, tuple) and len(mutation) == 2:
                 idx, power = mutation
                 mutation_noise = self.noise_table.get(idx, chromosome.num_params)
                 theta = theta + power * mutation_noise
+                self._log_debug(f"Applied mutation {i+1}: idx={idx}, power={power:.6f}, new_mean={theta.mean():.6f}")
             else:
                 # Handle old seed format
                 idx = mutation
@@ -183,6 +251,9 @@ class GPUWorkerProcess:
         
         # Cache the result
         self.weight_cache[cache_key] = theta.copy()
+        
+        # 🐛 调试：记录最终权重的统计信息
+        self._log_debug(f"Final weights - mean: {theta.mean():.6f}, std: {theta.std():.6f}, min: {theta.min():.6f}, max: {theta.max():.6f}")
         
         return theta
     
@@ -205,9 +276,10 @@ class GPUWorkerProcess:
         """Apply flat weights array to LoRA layers."""
         gene_index = 0
         applied_pairs = 0
+        total_weights_applied = 0
         
         with torch.no_grad():
-            for layer in self.lora_layers:
+            for layer_idx, layer in enumerate(self.lora_layers):
                 # Get enabled LoRA projections for this layer
                 enabled_projections = []
                 if hasattr(layer, "q_proj") and hasattr(layer.q_proj, "enable_lora"):
@@ -242,6 +314,12 @@ class GPUWorkerProcess:
                     a_flat = weights_flat[gene_index:gene_index + a_size]
                     b_flat = weights_flat[gene_index + a_size:gene_index + a_size + b_size]
                     
+                    # 🐛 调试：记录第一个权重的值（用于验证权重是否不同）
+                    if applied_pairs == 0:
+                        first_weight_sample = a_flat[0] if len(a_flat) > 0 else 0
+                        self._log_debug(f"Applying weights - first weight sample: {first_weight_sample:.6f}, "
+                                      f"weights_flat mean: {weights_flat.mean():.6f}, std: {weights_flat.std():.6f}")
+                    
                     # Convert to tensor and move to device
                     weight_a = torch.from_numpy(a_flat).reshape(projection_module.w_lora_A.shape).to(
                         self.device, dtype=projection_module.w_lora_A.dtype
@@ -256,6 +334,13 @@ class GPUWorkerProcess:
                     
                     gene_index += a_size + b_size
                     applied_pairs += 1
+                    total_weights_applied += a_size + b_size
+        
+        # 🐛 调试：验证权重应用
+        if applied_pairs == 0:
+            self._log_debug(f"WARNING: No weights applied! Check LoRA layer configuration.")
+        else:
+            self._log_debug(f"Weights applied - {applied_pairs} LoRA pairs, {total_weights_applied} total parameters")
 
     
     def get_cache_stats(self) -> Dict:
@@ -286,8 +371,12 @@ class GPUWorkerProcess:
 
 
 # Worker function for process pool
-def worker_initializer(gpu_id, base_model_state, lora_layers_state, noise_table, worker_id, debug):
-    """Initialize worker process with model and LoRA layers."""
+def worker_initializer(gpu_id, base_model_state, lora_layers_state, noise_table, worker_id, 
+                      dataset=None, classnames=None, template=None, debug=True):
+    """Initialize worker process with model and LoRA layers.
+    
+    🚀 性能优化：传递dataset以便在worker中创建并缓存train_loader
+    """
     try:
         # 🎯 安全地设置CUDA设备
         if torch.cuda.is_available():
@@ -309,13 +398,21 @@ def worker_initializer(gpu_id, base_model_state, lora_layers_state, noise_table,
                 layer_copy = layer_copy.cuda(gpu_id)
             lora_layers.append(layer_copy)
         
-        # Create worker instance
+        # 为每个worker分配唯一的ID（基于进程ID和GPU ID）
+        import os
+        process_id = os.getpid()
+        unique_worker_id = gpu_id * 10000 + (process_id % 10000)
+        
+        # 🚀 创建worker实例，传递dataset以便创建train_loader
         worker = GPUWorkerProcess(
-            worker_id=worker_id,
+            worker_id=unique_worker_id,
             gpu_id=gpu_id,
             base_model=base_model,
             lora_layers=lora_layers,
             noise_table=noise_table,
+            dataset=dataset,       # 传递dataset以便创建train_loader
+            classnames=classnames, # 传递classnames
+            template=template,     # 传递template
             debug=debug
         )
         
@@ -323,7 +420,7 @@ def worker_initializer(gpu_id, base_model_state, lora_layers_state, noise_table,
         mp.current_process()._worker = worker
         
         if debug:
-            print(f"[WORKER] Worker {worker_id} initialized on GPU{gpu_id}")
+            print(f"[WORKER] Worker {unique_worker_id} (PID {process_id}) initialized on GPU{gpu_id}")
             
         return worker
         
@@ -334,15 +431,29 @@ def worker_initializer(gpu_id, base_model_state, lora_layers_state, noise_table,
         raise
 
 def evaluate_chromosome_worker(args):
-    """Worker function for evaluating a single chromosome."""
-    chromosome_data, dataset, data_loader_kwargs, cached_text_features = args
+    """Worker function for evaluating a single chromosome.
+    
+    🚀 性能优化：train_loader已在worker初始化时缓存，无需传递
+    """
+    chromosome_data, cached_text_features = args
     worker = getattr(mp.current_process(), '_worker', None)
     
     if worker is None:
         raise RuntimeError("Worker not initialized in process")
     
+    # 🐛 调试：验证chromosome是否正确传递
+    if hasattr(chromosome_data, 'seeds'):
+        seeds_repr = "None"
+        if chromosome_data.seeds:
+            if len(chromosome_data.seeds) > 0:
+                seeds_repr = f"base={chromosome_data.seeds[0]}, len={len(chromosome_data.seeds)}"
+        if worker.debug:
+            import os
+            pid = os.getpid()
+            print(f"[WORKER PID {pid}] Received chromosome - seeds: {seeds_repr}, num_params: {chromosome_data.num_params}")
+    
     return worker.evaluate_single(
-        chromosome_data, dataset, cached_text_features, data_loader_kwargs
+        chromosome_data, cached_text_features
     )
 
 
@@ -358,6 +469,7 @@ class ParallelEvaluator:
                  noise_table: SharedNoiseTable,
                  gpu_ids: List[int] = None, 
                  processes_per_gpu: int = 2,
+                 dataset=None,
                  debug: bool = True):
         """
         Initialize process-based parallel evaluator.
@@ -368,6 +480,7 @@ class ParallelEvaluator:
             noise_table: Shared noise table for seed-based weight reconstruction
             gpu_ids: List of GPU device IDs to use
             processes_per_gpu: Number of processes per GPU for true parallel evaluation
+            dataset: Dataset object with train_loader, test_loader, val_loader attributes
             debug: Enable debug logging
         """
         self.base_model = base_model
@@ -377,6 +490,18 @@ class ParallelEvaluator:
         self.processes_per_gpu = processes_per_gpu
         self.debug = debug
         self.evaluation_count = 0
+        
+        # 保存dataset引用（用于传递给worker）
+        self._dataset = dataset
+        
+        # 从dataset提取必要信息（classnames, template）
+        if dataset is not None:
+            self.classnames = dataset.classnames if hasattr(dataset, 'classnames') else None
+            self.template = getattr(dataset, 'template', None)
+            # 注意：train_loader不再在主进程中保存，而是在每个worker中创建
+        else:
+            self.classnames = None
+            self.template = None
         
         self._validate_gpu_ids()
         self.process_pools = {}
@@ -404,13 +529,23 @@ class ParallelEvaluator:
         self._log_debug(f"Validated GPU IDs: {self.gpu_ids}")
     
     def _initialize_process_pools(self):
-        """Initialize process pools for each GPU."""
+        """Initialize process pools for each GPU.
+        
+        🚀 性能优化：传递dataset以便在worker中创建并缓存train_loader
+        """
         self._log_debug(f"Initializing process pools for {len(self.gpu_ids)} GPUs...")
         start_time = time.time()
+        
+        # 获取dataset对象（用于在worker中创建train_loader）
+        # 注意：这里需要保存原始的dataset对象引用
+        dataset_for_workers = None
+        if hasattr(self, '_dataset') and self._dataset is not None:
+            dataset_for_workers = self._dataset
         
         for gpu_id in self.gpu_ids:
             try:
                 # Create process pool for this GPU
+                # 🚀 传递dataset以便在worker初始化时创建train_loader
                 pool = ProcessPoolExecutor(
                     max_workers=self.processes_per_gpu,
                     initializer=worker_initializer,
@@ -419,7 +554,10 @@ class ParallelEvaluator:
                         self.base_model,
                         self.list_lora_layers,
                         self.noise_table,
-                        gpu_id,  # worker_id
+                        gpu_id,  # worker_id (will be made unique per process)
+                        dataset_for_workers,  # 🚀 传递dataset以便创建train_loader
+                        self.classnames,  # 传递classnames
+                        self.template,    # 传递template
                         self.debug
                     )
                 )
@@ -439,16 +577,13 @@ class ParallelEvaluator:
             timestamp = time.strftime("%H:%M:%S")
             print(f"[DEBUG ParallelEvaluator {timestamp}] {message}")
     
-    def evaluate_population_parallel(self, population: List[Chromosome], dataset, 
-                                   data_loader_kwargs: Optional[Dict] = None,
+    def evaluate_population_parallel(self, population: List[Chromosome], 
                                    cached_text_features: Optional[torch.Tensor] = None) -> None:
         """
         Evaluate population using process-based parallelism with seed-based weight transfer.
         
         Args:
             population: List of chromosomes to evaluate (only seeds are transferred)
-            dataset: Dataset for evaluation (not data loader)
-            data_loader_kwargs: Arguments to create data loaders in worker processes
             cached_text_features: Pre-computed text features for efficiency
         """
         self.evaluation_count += 1
@@ -466,14 +601,18 @@ class ParallelEvaluator:
         if chromosomes_without_seeds:
             self._log_debug(f"Warning: {len(chromosomes_without_seeds)} chromosomes without seeds")
         
+        # 检查dataset是否可用
+        if self._dataset is None:
+            raise RuntimeError("Dataset not available. Please provide dataset with train_loader in __init__.")
+        
         # Fallback to sequential evaluation if no process pools available
         if not self.process_pools:
             self._log_debug("No process pools available, using sequential evaluation")
-            self._evaluate_sequential(population, dataset, data_loader_kwargs, cached_text_features)
+            self._evaluate_sequential(population, cached_text_features)
             return
         
         # Distribute chromosomes across GPUs (round-robin)
-        tasks = self._distribute_tasks(population, dataset, data_loader_kwargs, cached_text_features)
+        tasks = self._distribute_tasks(population, cached_text_features)
         
         self._log_debug(f"Distributed {len(tasks)} tasks across {len(self.process_pools)} GPUs")
         
@@ -516,17 +655,46 @@ class ParallelEvaluator:
         # Calculate evaluation statistics
         self._log_evaluation_stats(population, completed_count, failed_count, parallel_time, total_time)
     
-    def _distribute_tasks(self, population: List[Chromosome], dataset, 
-                         data_loader_kwargs: Optional[Dict] = None,
+    def _distribute_tasks(self, population: List[Chromosome], 
                          cached_text_features: Optional[torch.Tensor] = None) -> List[Tuple[int, Tuple]]:
         """
         Distribute chromosomes across GPUs in round-robin fashion.
+        
+        🚀 性能优化：train_loader已在worker中缓存，只需传递chromosome和cached_text_features
         
         Returns:
             List of (gpu_id, task_data) tuples
         """
         tasks = []
         gpu_ids = list(self.process_pools.keys())
+        
+        # 🐛 调试：检查population中chromosomes的seeds是否不同
+        unique_seeds = set()
+        seeds_list = []
+        base_seeds = []
+        for idx, chrom in enumerate(population):
+            if chrom.need_update and chrom.seeds:
+                # 创建seeds的hashable表示用于比较
+                seeds_tuple = tuple(chrom.seeds) if isinstance(chrom.seeds, (list, tuple)) else (chrom.seeds,)
+                unique_seeds.add(seeds_tuple)
+                seeds_list.append((idx, seeds_tuple[:3] if len(seeds_tuple) > 3 else seeds_tuple))  # 只记录前3个
+                # 记录base seed
+                if len(seeds_tuple) > 0:
+                    base_seed = seeds_tuple[0]
+                    base_seeds.append(base_seed)
+        
+        self._log_debug(f"Population seeds check - total: {len(population)}, need_update: {sum(1 for c in population if c.need_update)}, unique_seeds: {len(unique_seeds)}")
+        
+        # 🐛 检查base seeds是否相同
+        unique_base_seeds = set(base_seeds)
+        if len(unique_base_seeds) == 1 and len(base_seeds) > 1:
+            self._log_debug(f"ERROR: All chromosomes have the same base seed: {base_seeds[0] if base_seeds else 'None'}")
+            self._log_debug(f"This means all chromosomes will have similar or identical weights!")
+        
+        if len(unique_seeds) < 3 and len(population) >= 3:
+            self._log_debug(f"WARNING: Only {len(unique_seeds)} unique seeds for {len(population)} chromosomes!")
+            self._log_debug(f"Sample seeds (first 10): {seeds_list[:10]}")
+            self._log_debug(f"Base seeds (first 20): {base_seeds[:20]}")
         
         for idx, chrom in enumerate(population):
             if not chrom.need_update:
@@ -535,11 +703,17 @@ class ParallelEvaluator:
             # Round-robin distribution across GPUs
             gpu_id = gpu_ids[idx % len(gpu_ids)]
             
+            # 🐛 调试：记录chromosome的seeds信息
+            chrom_seeds_preview = "None"
+            if chrom.seeds:
+                if len(chrom.seeds) > 0:
+                    chrom_seeds_preview = f"{chrom.seeds[0]}" + (f"+{len(chrom.seeds)-1}muts" if len(chrom.seeds) > 1 else "")
+            
+            # 🚀 只需传递chromosome和cached_text_features
+            # train_loader、classnames、template已在worker初始化时缓存
             task_data = (
                 chrom,  # chromosome_data
-                dataset,
-                data_loader_kwargs or {},  # 传递数据加载器参数
-                cached_text_features
+                cached_text_features  # 只传递cached_text_features
             )
             
             tasks.append((gpu_id, task_data))
@@ -575,11 +749,13 @@ class ParallelEvaluator:
                       f"Success rate: {success_rate:.1f}%, "
                       f"Diversity: {diversity_rate:.1f}%")
     
-    def _evaluate_sequential(self, population: List[Chromosome], dataset, 
-                           data_loader_kwargs: Optional[Dict] = None,
+    def _evaluate_sequential(self, population: List[Chromosome], 
                            cached_text_features: Optional[torch.Tensor] = None):
         """Fallback sequential evaluation when no process pools are available."""
         self._log_debug("Using sequential evaluation fallback")
+        
+        if self._dataset is None:
+            raise RuntimeError("Dataset not available for sequential evaluation.")
         
         # Create a temporary worker on CPU or first available GPU
         if torch.cuda.is_available() and self.gpu_ids:
@@ -593,6 +769,9 @@ class ParallelEvaluator:
             base_model=self.base_model,
             lora_layers=self.list_lora_layers,
             noise_table=self.noise_table,
+            dataset=self._dataset,  # 传递dataset以便创建train_loader
+            classnames=self.classnames,
+            template=self.template,
             debug=self.debug
         )
         
@@ -600,7 +779,7 @@ class ParallelEvaluator:
             if chrom.need_update:
                 try:
                     fitness = worker.evaluate_single(
-                        chrom, dataset, cached_text_features, data_loader_kwargs
+                        chrom, cached_text_features  # train_loader已在worker中缓存
                     )
                     chrom.fitness = fitness
                     chrom.need_update = False

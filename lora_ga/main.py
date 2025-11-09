@@ -56,23 +56,26 @@ def run_lora_ga_parallel(args, clip_model, dataset, gpu_id=0):
         noise_table=noise_table,
         use_adaptive_mutation=True
     )
+    
+    # 预计算文本特征，避免在每个worker中重复计算
+    if args.encoder == "vision":
+        text_features = precompute_text_features(clip_model, dataset)
+    else:
+        text_features = None
+    
+    # 初始化并行评估器，直接使用dataset.train_loader
     parallel_evaluator = ParallelEvaluator(
         base_model=clip_model,
         list_lora_layers=list_lora_layers,
-        noise_table=noise_table,  # 传递噪声表
+        noise_table=noise_table,
         gpu_ids=[1,4,5],
         processes_per_gpu=8,
+        dataset=dataset,  # dataset包含train_loader, test_loader, val_loader
         debug=True
     )
     
     stats = parallel_evaluator.get_stats()
     print(f"[MAIN] 并行评估器初始化完成: {stats}")
-    
-    # 预计算特征
-    if args.encoder == "vision":
-        text_features = precompute_text_features(clip_model, dataset)
-    else:
-        text_features = None
 
     # 初始化种群
     pop_size = max(2 * ((POPULATION_SIZE + 1) // 2), NUM_ELITES + 2)
@@ -88,9 +91,9 @@ def run_lora_ga_parallel(args, clip_model, dataset, gpu_id=0):
     for gen in range(NUM_GENERATIONS):
         start_time = time.time()
         
-        # 并行评估种群
+        # 并行评估种群（dataset已在初始化时传入，这里不需要再传）
         parallel_evaluator.evaluate_population_parallel(
-            population, dataset.train_loader, dataset, text_features
+            population, cached_text_features=text_features
         )
         
         # 获取统计信息
