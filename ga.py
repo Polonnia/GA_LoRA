@@ -723,7 +723,7 @@ def run_lora_ga(args, clip_model, dataset, gpu_ids=[0], num_proc_per_gpu=4):
             max_workers=num_proc_per_gpu,
             mp_context=spawn_ctx,
             initializer=_init_gpu_worker,
-            initializer_args=(gpu_id,),
+            initargs=(gpu_id,),
         )
         for gpu_id in gpu_ids
     }
