@@ -26,6 +26,15 @@ _SHARED_WORKER_MODELS = {}
 _SHARED_WORKER_DATA = {}
 
 
+def _init_gpu_worker(gpu_id: int):
+    """Initializer to pin worker processes to a specific GPU."""
+    try:
+        torch.cuda.set_device(gpu_id)
+    except Exception:
+        # If CUDA is not available in this context, keep silent to avoid worker crashes.
+        pass
+
+
 # ------------------------------
 # 全局参数
 # ------------------------------
@@ -708,8 +717,14 @@ def run_lora_ga(args, clip_model, dataset, gpu_ids=[0], num_proc_per_gpu=4):
     population = init_pop(pop_size=pop_size, list_lora_layers=list_lora_layers)
 
     mp.set_start_method('spawn', force=True)
+    spawn_ctx = mp.get_context("spawn")
     executor_map = {
-        gpu_id: ProcessPoolExecutor(max_workers=num_proc_per_gpu)
+        gpu_id: ProcessPoolExecutor(
+            max_workers=num_proc_per_gpu,
+            mp_context=spawn_ctx,
+            initializer=_init_gpu_worker,
+            initializer_args=(gpu_id,),
+        )
         for gpu_id in gpu_ids
     }
 
