@@ -272,29 +272,25 @@ def evaluate_single_worker(args):
     torch.cuda.synchronize(device)
 
     # 2) 全局数据缓存：每个 worker / GPU 只搬一次到目标设备
-    if device_key in _SHARED_WORKER_DATA:
-        cached_text_features, cached_tokens, cached_image_features = _SHARED_WORKER_DATA[device_key]
-    else:
-        cached_text_features = None
-        if eval_args.get('cached_text_features') is not None:
-            cached_text_features = eval_args['cached_text_features'].to(device)
+    shared_cache = _SHARED_WORKER_DATA.setdefault(device_key, {})
 
-        cached_tokens = None
-        if eval_args.get('cached_tokens') is not None:
-            cached_tokens = eval_args['cached_tokens'].to(device)
+    cached_text_features = shared_cache.get("cached_text_features")
+    if cached_text_features is None and eval_args.get('cached_text_features') is not None:
+        cached_text_features = eval_args['cached_text_features'].to(device)
+        shared_cache["cached_text_features"] = cached_text_features
 
-        cached_image_features = None
-        if eval_args.get('cached_image_features') is not None:
-            cached_image_features = [
-                (feats.to(device), target.to(device))
-                for feats, target in eval_args['cached_image_features']
-            ]
+    cached_tokens = shared_cache.get("cached_tokens")
+    if cached_tokens is None and eval_args.get('cached_tokens') is not None:
+        cached_tokens = eval_args['cached_tokens'].to(device)
+        shared_cache["cached_tokens"] = cached_tokens
 
-        _SHARED_WORKER_DATA[device_key] = (
-            cached_text_features,
-            cached_tokens,
-            cached_image_features,
-        )
+    cached_image_features = shared_cache.get("cached_image_features")
+    if cached_image_features is None and eval_args.get('cached_image_features') is not None:
+        cached_image_features = [
+            (feats.to(device), target.to(device))
+            for feats, target in eval_args['cached_image_features']
+        ]
+        shared_cache["cached_image_features"] = cached_image_features
 
     # 评估适应度（直接在此实现，不再调用 evaluate_lora）
     clip_model.eval()
@@ -376,7 +372,20 @@ def evaluate_single_worker(args):
                     break
         else:
             # 否则按 batch 通过 clip_model 提取图像特征
-            for images, target in eval_args["train_loader"]:
+            train_loader_cfg = eval_args.get("train_loader_cfg")
+            if train_loader_cfg is None:
+                raise RuntimeError("train_loader configuration missing for image-feature evaluation.")
+
+            local_loader = shared_cache.get("train_loader")
+            if local_loader is None:
+                cfg = dict(train_loader_cfg)
+                dataset = cfg.pop("dataset")
+                cfg.setdefault("num_workers", 0)
+                cfg.setdefault("persistent_workers", False)
+                local_loader = torch.utils.data.DataLoader(dataset, **cfg)
+                shared_cache["train_loader"] = local_loader
+
+            for images, target in local_loader:
                 # DataLoader + CPU 预处理 + H2D 拷贝时间
                 images = images.to(device, non_blocking=True)
                 target = target.to(device, non_blocking=True)
@@ -444,8 +453,21 @@ def update_fitness_parallel_mp(
         return
     
     # 准备评估参数
+    loader_cfg = None
+    if train_loader is not None:
+        loader_cfg = {
+            "dataset": train_loader.dataset,
+            "batch_size": getattr(train_loader, "batch_size", 1),
+            "shuffle": False,
+            "num_workers": 0,
+            "pin_memory": getattr(train_loader, "pin_memory", False),
+            "drop_last": getattr(train_loader, "drop_last", False),
+            "collate_fn": getattr(train_loader, "collate_fn", None),
+            "persistent_workers": False,
+        }
+
     eval_args = {
-        'train_loader': train_loader,
+        'train_loader_cfg': loader_cfg,
         'classnames': classnames,
         'cached_text_features': cached_text_features,
         'cached_tokens': cached_tokens,
