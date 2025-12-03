@@ -106,7 +106,7 @@ def run_lora_adam(args, clip_model, logit_scale, dataset, train_from_ga=True):
         # Eval - 在每次epoch结束后进行验证
         if VALIDATION:
             clip_model.eval()
-            acc_val = evaluate_lora(clip_model, dataset.val_loader, dataset)
+            acc_val = evaluate_lora(clip_model, dataset.val_loader, dataset.classnames)
             val_accuracies.append(acc_val)
             val_iterations.append(count_iters)  # 记录验证时的迭代次数
             print("**** Iter: {}, Val accuracy: {:.2f}. ****\n".format(count_iters, acc_val))

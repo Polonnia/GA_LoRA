@@ -40,7 +40,7 @@ def unwrap(model):
     return model.module if isinstance(model, torch.nn.DataParallel) else model
 
 @torch.no_grad()
-def evaluate_lora(clip_model, loader, dataset, cached_text_features=None, cached_image_batches=None, cached_tokens=None):
+def evaluate_lora(clip_model, loader, classnames, cached_text_features=None, cached_image_batches=None, cached_tokens=None):
     clip_model.eval()
     
     # Ensure the model is on the correct device
@@ -48,17 +48,22 @@ def evaluate_lora(clip_model, loader, dataset, cached_text_features=None, cached
     
     # Prepare or reuse text features
     if cached_text_features is not None:
-        text_features = cached_text_features
+        # Ensure cached text features are on the correct device
+        text_features = cached_text_features.to(device)
     else:
         if cached_tokens is not None:
             texts = cached_tokens.to(device)  # Ensure tokens are on the correct device
         else:
             template = "a photo of a {}."
-            texts = [template.format(classname.replace('_', ' ')) for classname in dataset.classnames]
+            texts = [template.format(classname.replace('_', ' ')) for classname in classnames]
             with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
                 texts = clip.tokenize(texts).to(device)  # Move tokens to the correct device
         class_embeddings = clip_model.encode_text(texts)
         text_features = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
+
+    # Ensure text_features is on the correct device
+    if text_features.device != device:
+        text_features = text_features.to(device)
 
     acc = 0.0
     tot_samples = 0
@@ -68,6 +73,10 @@ def evaluate_lora(clip_model, loader, dataset, cached_text_features=None, cached
                 # Ensure image_features and target are on the correct device
                 image_features = image_features.to(device)
                 target = target.to(device)
+
+                # Ensure text_features is on the same device as image_features
+                if text_features.device != image_features.device:
+                    text_features = text_features.to(image_features.device)
 
                 # Ensure dtypes match (image_features may be half under autocast)
                 if image_features.dtype != text_features.dtype:
@@ -100,75 +109,6 @@ def evaluate_lora(clip_model, loader, dataset, cached_text_features=None, cached
     acc /= tot_samples
     return acc
 
-
-def evaluate_loss(
-    clip_model,
-    loader,
-    dataset,
-    cached_text_features=None,
-    cached_tokens=None,
-    cached_image_batches=None,
-):
-    """
-    Compute the average cross-entropy loss of the model (lower is better, but we may return negative loss as fitness to maximize).
-    """
-    import torch
-    import torch.nn.functional as F
-
-    clip_model.eval()
-    device = next(clip_model.parameters()).device
-
-    # Prepare or reuse text features
-    if cached_text_features is not None:
-        text_features = cached_text_features.to(device)
-    else:
-        if cached_tokens is not None:
-            texts = cached_tokens.to(device)
-        else:
-            template = dataset.template[0]
-            texts = [template.format(classname.replace('_', ' ')) for classname in dataset.classnames]
-            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-                texts = clip.tokenize(texts).to(device)
-        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-            class_embeddings = clip_model.encode_text(texts)
-        text_features = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
-
-    total_loss = 0.0
-    total_samples = 0
-
-    loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
-
-    with torch.no_grad():
-        if cached_image_batches is not None:
-            for image_features, target in cached_image_batches:
-                target = target.to(image_features.device)
-                if image_features.dtype != text_features.dtype:
-                    text_features_batch = text_features.to(image_features.dtype)
-                else:
-                    text_features_batch = text_features
-                logits = 100 * (image_features @ text_features_batch.t())
-                loss = loss_fn(logits, target)
-                total_loss += float(loss.item())
-                total_samples += logits.size(0)
-        else:
-            for images, target in loader:
-                images = images.to(device, non_blocking=True)
-                target = target.to(device, non_blocking=True)
-                with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-                    image_features = clip_model.encode_image(images)
-                image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-                if image_features.dtype != text_features.dtype:
-                    text_features_batch = text_features.to(image_features.dtype)
-                else:
-                    text_features_batch = text_features
-                logits = 100 * (image_features @ text_features_batch.t())
-                loss = loss_fn(logits, target)
-                total_loss += float(loss.item())
-                total_samples += logits.size(0)
-
-    avg_loss = total_loss / max(total_samples, 1)
-    # Return negative loss as fitness (higher is better for GA)
-    return -avg_loss
 
 
 # _evaluate_imagenet_variant function
@@ -225,7 +165,7 @@ def evaluate_imagenet_variant(clip_model, variant_name, root_path):
     
     return float(acc / max(tot, 1))
 
-def evaluate(clip_model, opt, test_loader, dataset, eval_datasets, result_path, seed, root_path=None):
+def evaluate(clip_model, opt, dataset, eval_datasets, result_path, seed, root_path=None):
     import os
     import json
     result_json_path = os.path.join(result_path, f'val_results_{opt}.json')
@@ -236,8 +176,9 @@ def evaluate(clip_model, opt, test_loader, dataset, eval_datasets, result_path, 
             exist = json.load(f)
     except Exception:
         exist = {}
-    acc_test = evaluate_lora(clip_model, test_loader, dataset)
-    print("**** Test accuracy: {:.2f}. ****\n".format(acc_test))
+
+    acc_test = evaluate_lora(clip_model, dataset.test_loader, dataset.classnames)
+    print("**** ID accuracy: {:.2f}. ****\n".format(acc_test))
     exist.update({f'acc_test_seed{seed}': float(acc_test)})
 
     tot_acc = 0

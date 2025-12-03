@@ -26,7 +26,7 @@ def get_arguments():
     # Training arguments
     parser.add_argument('--lr', default=2e-4, type=float)
     parser.add_argument('--n_iters', default=500, type=int)
-    parser.add_argument('--batch_size', default=16, type=int)
+    parser.add_argument('--batch_size', default=256, type=int)
     # LoRA arguments
     parser.add_argument('--position', type=str, default='up', choices=['bottom', 'mid', 'up', 'half-up', 'half-bottom', 'all', 'top3'], help='where to put the LoRA modules')
     parser.add_argument('--encoder', type=str, choices=['text', 'vision', 'both'], default='vision')

@@ -177,16 +177,24 @@ imagenet_classes = ["tench", "goldfish", "great white shark", "tiger shark", "ha
                         "earth star fungus", "hen of the woods mushroom", "bolete", "corn cob", "toilet paper"]
 
 imagenet_templates = ["a photo of a {}."]
-
 class ImageNet():
     dataset_dir = 'Imagenet'
 
-    def __init__(self, root, num_shots=0, preprocess=None, batch_size=32):
+    def __init__(self, root, num_shots=0, preprocess=None, batch_size=32, num_workers=8, train_only=False):
         self.dataset_dir = os.path.join(root, self.dataset_dir)
         
         self.train_x = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'train')), transform=preprocess)
-        self.val = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'train')), transform=preprocess)
-        self.test = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'val')), transform=preprocess)
+        
+        if train_only:
+            # train_only=True: 只创建训练集
+            self.val = None
+            self.test = None
+            self.val_loader = None
+            self.test_loader = None
+        else:
+            # train_only=False: 创建训练集、验证集和测试集
+            self.val = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'train')), transform=preprocess)
+            self.test = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'val')), transform=preprocess)
         
         self.template = imagenet_templates
         self.classnames = imagenet_classes
@@ -196,16 +204,20 @@ class ImageNet():
             self.train_loader = None
             self.val_loader = None
             # Use the original test set as is
-            self.test_loader = torch.utils.data.DataLoader(
-                self.test, 
-                batch_size=batch_size, 
-                num_workers=8, 
-                shuffle=False, 
-                pin_memory=True
-            )
+            if not train_only:
+                self.test_loader = torch.utils.data.DataLoader(
+                    self.test, 
+                    batch_size=batch_size, 
+                    num_workers=num_workers, 
+                    shuffle=False, 
+                    pin_memory=True
+                )
+            else:
+                self.test_loader = None
             
-            print(f"ImageNet Dataset Statistics (shots={num_shots}):")
-            print(f"  Test: {len(self.test.imgs)} samples")
+            print(f"ImageNet Dataset Statistics (shots={num_shots}, train_only={train_only}):")
+            if not train_only:
+                print(f"  Test: {len(self.test.imgs)} samples")
             return
         
         # For num_shots > 0, proceed with normal few-shot split
@@ -257,36 +269,47 @@ class ImageNet():
         self.train_x.targets = targets
         self.train_x.samples = imgs
         
-        self.val.imgs = imgs_val
-        self.val.targets = targets_val
-        self.val.samples = imgs_val
-        
+        # 创建训练数据加载器
         self.train_loader = torch.utils.data.DataLoader(
             self.train_x, 
             batch_size=batch_size, 
-            num_workers=8, 
+            num_workers=num_workers, 
             shuffle=True, 
             pin_memory=True
         )
-        self.val_loader = torch.utils.data.DataLoader(
-            self.val, 
-            batch_size=batch_size, 
-            num_workers=8, 
-            shuffle=False, 
-            pin_memory=True
-        )
-        self.test_loader = torch.utils.data.DataLoader(
-            self.test, 
-            batch_size=batch_size, 
-            num_workers=8, 
-            shuffle=False, 
-            pin_memory=True
-        )
         
-        print(f"ImageNet Dataset Statistics (shots={num_shots}):")
+        if not train_only:
+            # train_only=False 时创建验证集和测试集
+            self.val.imgs = imgs_val
+            self.val.targets = targets_val
+            self.val.samples = imgs_val
+            
+            self.val_loader = torch.utils.data.DataLoader(
+                self.val, 
+                batch_size=batch_size, 
+                num_workers=num_workers, 
+                shuffle=False, 
+                pin_memory=True
+            )
+            self.test_loader = torch.utils.data.DataLoader(
+                self.test, 
+                batch_size=batch_size, 
+                num_workers=num_workers, 
+                shuffle=False, 
+                pin_memory=True
+            )
+        else:
+            # train_only=True 时不创建验证集和测试集
+            self.val = None
+            self.test = None
+            self.val_loader = None
+            self.test_loader = None
+        
+        print(f"ImageNet Dataset Statistics (shots={num_shots}, train_only={train_only}):")
         print(f"  Train: {len(imgs)} samples")
-        print(f"  Val: {len(imgs_val)} samples")
-        print(f"  Test: {len(self.test.imgs)} samples")
+        if not train_only:
+            print(f"  Val: {len(imgs_val)} samples")
+            print(f"  Test: {len(self.test.imgs)} samples")
 
     def name(self):
         return 'imagenet'
