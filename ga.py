@@ -4,7 +4,7 @@ import json
 import math
 import random
 import time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -421,7 +421,8 @@ def update_fitness_parallel_mp(
     cached_tokens=None,
     cached_image_features=None,
     num_proc_per_gpu: int = 1,
-    executor: Optional[ProcessPoolExecutor] = None
+    executor: Optional[ProcessPoolExecutor] = None,
+    executor_map: Optional[Dict[int, ProcessPoolExecutor]] = None,
 ):
     """使用多进程实现真正的并行评估"""
     
@@ -496,14 +497,23 @@ def update_fitness_parallel_mp(
     results = [None] * len(population)
 
     created_executor = False
-    pool = executor
-    if pool is None:
-        pool = ProcessPoolExecutor(max_workers=total_workers)
-        created_executor = True
-
     futures = []
-    for task in tasks:
-        futures.append(pool.submit(evaluate_single_worker, task))
+
+    if executor_map is not None:
+        for task in tasks:
+            gpu_id = task[2]
+            pool = executor_map.get(gpu_id)
+            if pool is None:
+                raise RuntimeError(f"No executor found for GPU {gpu_id}")
+            futures.append(pool.submit(evaluate_single_worker, task))
+    else:
+        pool = executor
+        if pool is None:
+            pool = ProcessPoolExecutor(max_workers=total_workers)
+            created_executor = True
+
+        for task in tasks:
+            futures.append(pool.submit(evaluate_single_worker, task))
 
     for future in tqdm(as_completed(futures), total=len(futures), desc="Evaluating chromosomes"):
         chrom_idx, fitness = future.result()
@@ -697,9 +707,11 @@ def run_lora_ga(args, clip_model, dataset, gpu_ids=[0], num_proc_per_gpu=4):
     pop_size = max(2 * ((POPULATION_SIZE + 1) // 2), NUM_ELITES + 2)
     population = init_pop(pop_size=pop_size, list_lora_layers=list_lora_layers)
 
-    total_workers = len(gpu_ids) * num_proc_per_gpu
     mp.set_start_method('spawn', force=True)
-    executor = ProcessPoolExecutor(max_workers=total_workers)
+    executor_map = {
+        gpu_id: ProcessPoolExecutor(max_workers=num_proc_per_gpu)
+        for gpu_id in gpu_ids
+    }
 
     # 演化主循环
     try:
@@ -717,7 +729,7 @@ def run_lora_ga(args, clip_model, dataset, gpu_ids=[0], num_proc_per_gpu=4):
                 cached_tokens=tokens_cache,
                 cached_image_features=image_features_cache,
                 num_proc_per_gpu=num_proc_per_gpu,
-                executor=executor
+                executor_map=executor_map
             )
 
         # 统计结果
@@ -771,7 +783,8 @@ def run_lora_ga(args, clip_model, dataset, gpu_ids=[0], num_proc_per_gpu=4):
             num_parents=NUM_PARENTS
         )
     finally:
-        executor.shutdown()
+        for pool in executor_map.values():
+            pool.shutdown()
 
     # 最终评估和保存
     best_ind = max(
