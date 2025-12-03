@@ -420,7 +420,8 @@ def update_fitness_parallel_mp(
     cached_text_features=None,
     cached_tokens=None,
     cached_image_features=None,
-    num_proc_per_gpu: int = 1
+    num_proc_per_gpu: int = 1,
+    executor: Optional[ProcessPoolExecutor] = None
 ):
     """使用多进程实现真正的并行评估"""
     
@@ -491,21 +492,25 @@ def update_fitness_parallel_mp(
     
     # 使用多进程并行评估
     print(f"Starting parallel evaluation of {len(tasks)} chromosomes on {len(gpu_ids)} GPUs...")
-    
-    # 设置多进程启动方法
-    mp.set_start_method('spawn', force=True)
-    
+
     results = [None] * len(population)
-    
-    with ProcessPoolExecutor(max_workers=total_workers) as executor:
-        futures = []
-        for task in tasks:
-            f = executor.submit(evaluate_single_worker, task)
-            futures.append(f)
-        
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Evaluating chromosomes"):
-            chrom_idx, fitness = future.result()
-            results[chrom_idx] = fitness
+
+    created_executor = False
+    pool = executor
+    if pool is None:
+        pool = ProcessPoolExecutor(max_workers=total_workers)
+        created_executor = True
+
+    futures = []
+    for task in tasks:
+        futures.append(pool.submit(evaluate_single_worker, task))
+
+    for future in tqdm(as_completed(futures), total=len(futures), desc="Evaluating chromosomes"):
+        chrom_idx, fitness = future.result()
+        results[chrom_idx] = fitness
+
+    if created_executor:
+        pool.shutdown()
     
     # 更新种群适应度
     for idx, fitness in enumerate(results):
@@ -692,22 +697,28 @@ def run_lora_ga(args, clip_model, dataset, gpu_ids=[0], num_proc_per_gpu=4):
     pop_size = max(2 * ((POPULATION_SIZE + 1) // 2), NUM_ELITES + 2)
     population = init_pop(pop_size=pop_size, list_lora_layers=list_lora_layers)
 
+    total_workers = len(gpu_ids) * num_proc_per_gpu
+    mp.set_start_method('spawn', force=True)
+    executor = ProcessPoolExecutor(max_workers=total_workers)
+
     # 演化主循环
-    for gen in range(NUM_GENERATIONS):
-        num_to_evaluate = len([c for c in population if c.need_update])
-        print(f"Generation {gen}: Evaluating {num_to_evaluate} individuals on {len(gpu_ids)} GPUs...")
-        
-        update_fitness_parallel_mp(
-            population,
-            args,           # 传递LoRA参数
-            gpu_ids,
-            train_loader,
-            classnames,
-            cached_text_features=cached_text_features,
-            cached_tokens=tokens_cache,
-            cached_image_features=image_features_cache,
-            num_proc_per_gpu=num_proc_per_gpu
-        )
+    try:
+        for gen in range(NUM_GENERATIONS):
+            num_to_evaluate = len([c for c in population if c.need_update])
+            print(f"Generation {gen}: Evaluating {num_to_evaluate} individuals on {len(gpu_ids)} GPUs...")
+
+            update_fitness_parallel_mp(
+                population,
+                args,           # 传递LoRA参数
+                gpu_ids,
+                train_loader,
+                classnames,
+                cached_text_features=cached_text_features,
+                cached_tokens=tokens_cache,
+                cached_image_features=image_features_cache,
+                num_proc_per_gpu=num_proc_per_gpu,
+                executor=executor
+            )
 
         # 统计结果
         best_ind = max(
@@ -753,12 +764,14 @@ def run_lora_ga(args, clip_model, dataset, gpu_ids=[0], num_proc_per_gpu=4):
         
         # 产生新一代（传入变异调度器和当前代数）
         population, current_std = reproduce(
-            population, 
-            mutation_scheduler, 
+            population,
+            mutation_scheduler,
             gen,
-            num_elites=NUM_ELITES, 
+            num_elites=NUM_ELITES,
             num_parents=NUM_PARENTS
         )
+    finally:
+        executor.shutdown()
 
     # 最终评估和保存
     best_ind = max(
