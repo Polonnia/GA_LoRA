@@ -17,6 +17,7 @@ def cls_acc(output, target, topk=1):
 
 
 def clip_classifier(classnames, template, clip_model):
+    device = next(clip_model.parameters()).device
     with torch.no_grad():
         clip_weights = []
         for classname in classnames:
@@ -24,7 +25,7 @@ def clip_classifier(classnames, template, clip_model):
             classname = classname.replace('_', ' ')
             # Use single template (first entry) for zero-shot classifier
             text = template[0].format(classname)
-            texts = clip.tokenize([text]).cuda()
+            texts = clip.tokenize([text]).to(device)
             # Handle DataParallel wrapper
             model = clip_model.module if hasattr(clip_model, 'module') else clip_model
             class_embeddings = model.encode_text(texts)
@@ -32,7 +33,7 @@ def clip_classifier(classnames, template, clip_model):
             class_embedding = class_embeddings[0]
             class_embedding /= class_embedding.norm()
             clip_weights.append(class_embedding)
-        clip_weights = torch.stack(clip_weights, dim=1).cuda()
+        clip_weights = torch.stack(clip_weights, dim=1).to(device)
         
     return clip_weights
 
@@ -116,6 +117,8 @@ def evaluate_lora(clip_model, loader, classnames, cached_text_features=None, cac
 def evaluate_imagenet_variant(clip_model, variant_name, root_path):
     preprocess = _build_clip_preprocess()
 
+    device = next(clip_model.parameters()).device
+    
     if variant_name == 'imagenet-sketch':
         dataset_obj = ImageNetSketch(preprocess=preprocess, root="/home/dingzijin/datasets")
     elif variant_name == 'imagenet-v2':
@@ -135,7 +138,7 @@ def evaluate_imagenet_variant(clip_model, variant_name, root_path):
     texts = [template[0].format(c.replace('_', ' ')) for c in dataset_obj.classnames]
     base = unwrap(clip_model)
     with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-        tokenized = clip.tokenize(texts).cuda()
+        tokenized = clip.tokenize(texts).to(device)
         class_embeddings = base.encode_text(tokenized)
     text_features = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
 
@@ -151,8 +154,8 @@ def evaluate_imagenet_variant(clip_model, variant_name, root_path):
         else:
             raise TypeError(f"Unsupported batch type: {type(batch)}")
 
-        images = images.cuda()
-        labels = labels.cuda()
+        images = images.to(device)
+        labels = labels.to(device)
 
         with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
             image_features = base.encode_image(images)
@@ -209,4 +212,91 @@ def _build_clip_preprocess():
         transforms.ToTensor(),
         transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711))
     ])
+
+import matplotlib.pyplot as plt
+import os
+import json
+def plot_training_curves(args, iterations, train_losses, train_accuracies, val_iterations, val_accuracies, learning_rates):
+    """Plot training curves including loss, accuracy and learning rate"""
+    
+    # Create figure with subplots
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # Plot training loss
+    ax1.plot(iterations, train_losses, 'b-', linewidth=2, label='Training Loss')
+    ax1.set_xlabel('Iterations')
+    ax1.set_ylabel('Loss')
+    ax1.set_title('Training Loss Curve')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+    
+    # Plot training and validation accuracy
+    ax2.plot(iterations, train_accuracies, 'g-', linewidth=2, label='Training Accuracy')
+    if val_accuracies and len(val_iterations) == len(val_accuracies):
+        ax2.plot(val_iterations, val_accuracies, 'r-', linewidth=2, label='Validation Accuracy')
+    elif val_accuracies:
+        # 如果维度不匹配，使用训练迭代次数作为x轴
+        ax2.plot(iterations[:len(val_accuracies)], val_accuracies, 'r-', linewidth=2, label='Validation Accuracy')
+    ax2.set_xlabel('Iterations')
+    ax2.set_ylabel('Accuracy (%)')
+    ax2.set_title('Accuracy Curves')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    
+    # Plot learning rate
+    ax3.plot(iterations, learning_rates, 'purple', linewidth=2, label='Learning Rate')
+    ax3.set_xlabel('Iterations')
+    ax3.set_ylabel('Learning Rate')
+    ax3.set_title('Learning Rate Schedule')
+    ax3.grid(True, alpha=0.3)
+    ax3.set_yscale('log')
+    ax3.legend()
+    
+    # Plot combined view
+    ax4.plot(iterations, train_losses, 'b-', linewidth=2, label='Training Loss')
+    ax4_twin = ax4.twinx()
+    ax4_twin.plot(iterations, train_accuracies, 'g-', linewidth=2, label='Training Accuracy')
+    if val_accuracies and len(val_iterations) == len(val_accuracies):
+        ax4_twin.plot(val_iterations, val_accuracies, 'r-', linewidth=2, label='Validation Accuracy')
+    elif val_accuracies:
+        ax4_twin.plot(iterations[:len(val_accuracies)], val_accuracies, 'r-', linewidth=2, label='Validation Accuracy')
+    
+    ax4.set_xlabel('Iterations')
+    ax4.set_ylabel('Loss', color='b')
+    ax4_twin.set_ylabel('Accuracy (%)', color='g')
+    ax4.set_title('Loss and Accuracy')
+    ax4.grid(True, alpha=0.3)
+    
+    # Combine legends
+    lines1, labels1 = ax4.get_legend_handles_labels()
+    lines2, labels2 = ax4_twin.get_legend_handles_labels()
+    ax4.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
+    
+    plt.tight_layout()
+    
+    # Save the plot
+    if args.result_path:
+        plot_path = os.path.join(args.result_path, f'training_curves_{args.opt}.png')
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        print(f"Training curves saved to: {plot_path}")
+    
+    # Also save data as JSON for later analysis
+    if args.result_path:
+        data_path = os.path.join(args.result_path, f'training_data_{args.opt}.json')
+        training_data = {
+            'iterations': iterations,
+            'train_losses': train_losses,
+            'train_accuracies': train_accuracies,
+            'val_iterations': val_iterations,
+            'val_accuracies': val_accuracies,
+            'learning_rates': learning_rates,
+            'shots': args.shots,
+            'dataset': args.dataset,
+            'encoder': args.encoder
+        }
+        with open(data_path, 'w') as f:
+            json.dump(training_data, f, indent=2)
+        print(f"Training data saved to: {data_path}")
+    
+    plt.close()
 

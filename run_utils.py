@@ -16,6 +16,7 @@ def get_arguments():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', default=1, type=int)
+    parser.add_argument("--gpu_ids", default=[0,1,2,3,4,5], type=list)
     # Dataset arguments
     parser.add_argument('--root_path', type=str, default='/data/dataset', help='path to dataset root directory')
     parser.add_argument('--dataset', type=str, default='imagenet')
@@ -24,7 +25,7 @@ def get_arguments():
     # Model arguments
     parser.add_argument('--backbone', default='ViT-B/16', type=str)
     # Training arguments
-    parser.add_argument('--lr', default=2e-4, type=float)
+    parser.add_argument('--lr', default=1e-4, type=float)
     parser.add_argument('--n_iters', default=500, type=int)
     parser.add_argument('--batch_size', default=256, type=int)
     # LoRA arguments

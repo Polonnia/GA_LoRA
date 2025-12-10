@@ -7,6 +7,7 @@ from datasets.utils import build_data_loader
 
 from utils import *
 from run_utils import *
+from sgd import run_lora_sgd
 from lora_adam import run_lora_adam
 from ga import run_lora_ga
 from loralib.utils import mark_only_lora_as_trainable, apply_lora, get_lora_parameters, lora_state_dict, save_lora, load_lora
@@ -19,12 +20,9 @@ def main():
     
     set_random_seed(args.seed)
     
-    # CLIP
-    clip_model, preprocess = clip.load(args.backbone)
-    clip_model.eval()
     logit_scale = 100
 
-    shots_list = [1]
+    shots_list = [8]
     base_result_path = getattr(args, 'result_path', None)
     
     # # Zero-shot CLIP evaluation before training
@@ -64,17 +62,16 @@ def main():
 
         # Re-load CLIP model for each shot to avoid LoRA state contamination
         print(f"Loading CLIP model for shots={s}")
-        clip_model, preprocess = clip.load(args.backbone)
+        target_device = torch.device(f"cuda:{args.gpu_ids[0]}") 
+        clip_model, preprocess = clip.load(args.backbone, device=target_device)
         clip_model.eval()
         logit_scale = 100
 
+        root_path = args.root_path
         print(f"Preparing dataset (shots={s}).")
-        if args.dataset == 'imagenet-sketch' or args.dataset == 'imagenet-v2':
+        if(args.dataset == 'imagenet-v2' or args.dataset == 'imagenet-sketch'):
             root_path = '/home/dingzijin/datasets'
-            dataset = build_dataset(args.dataset, root_path, args.shots, preprocess, args.batch_size)
-        
-        else:
-            dataset = build_dataset(args.dataset, args.root_path, args.shots, preprocess, args.batch_size)
+        dataset = build_dataset(args.dataset, root_path, args.shots, preprocess, args.batch_size)
         
         # if args.dataset == 'imagenet':
         #     val_loader = torch.utils.data.DataLoader(dataset.val, batch_size=args.eval_batch_size, num_workers=8, shuffle=False, pin_memory=True)
@@ -106,19 +103,26 @@ def main():
                 print(f"Evaluating LoRA model for shots={s}.")
                 list_lora_layers = apply_lora(args, clip_model)
                 load_lora(args, list_lora_layers)
-                clip_model = clip_model.cuda()
+                target_device = torch.device(f"cuda:{args.gpu_ids[0]}") 
+                clip_model = clip_model.to(target_device)
                 clip_model.eval()
                 evaluate(clip_model, args.opt, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
                 continue
         
         if args.opt == 'adam':
             print("Running LoRA with AdamW optimization")
-            run_lora_adam(args, clip_model, logit_scale, dataset, train_from_ga=False)
+            run_lora_adam(args, clip_model, logit_scale, dataset, device_id=args.gpu_ids[0], train_from_ga=False)
+        elif args.opt == 'sgd':
+            print("Running LoRA with SGD optimization")
+            run_lora_sgd(args, clip_model, logit_scale, dataset, train_from_ga=False)
         elif args.opt == 'ga':
             print("Running LoRA with GA optimization")
-            run_lora_ga(args, clip_model, dataset, gpu_ids=[3,4,5,6], num_proc_per_gpu=2)
+            run_lora_ga(args, clip_model, dataset, gpu_ids=args.gpu_ids) #, num_proc_per_gpu=4
         else:
-            raise ValueError("Unknown optimization method specified. Use 'adam' or 'ga'.")
+            raise ValueError("Unknown optimization method specified. Use 'sgd', 'adam' or 'ga'.")
+        
+        target_device = torch.device(f"cuda:{args.gpu_ids[0]}") 
+        clip_model = clip_model.to(target_device)
         evaluate(clip_model, args.opt, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
 
 if __name__ == '__main__':

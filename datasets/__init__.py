@@ -4,7 +4,7 @@ from .imagenet_r import ImageNetR
 from .imagenet_sketch import ImageNetSketch
 from .imagenetv2 import ImageNetV2
 
-def build_dataset(dataset, root_path, shots=0, preprocess=None, batch_size=32, num_workers=8, train_only=False):
+def build_dataset(dataset, root_path, shots=0, preprocess=None, batch_size=256, num_workers=8, train_only=False):
     if dataset == 'imagenet':
         return ImageNet(
             root=root_path, 
