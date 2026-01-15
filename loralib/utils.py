@@ -181,7 +181,7 @@ def save_lora(args, list_lora_layers):
 
     save_path = f'{save_dir}/{args.opt}_{args.dataset}_{args.filename}.pt'
     torch.save(save_data, save_path)
-    print(f'LoRA weights saved to {save_path}')
+    # print(f'LoRA weights saved to {save_path}')
 
 
 def load_lora(args, list_lora_layers):

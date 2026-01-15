@@ -235,7 +235,6 @@ def plot_training_curves(args, iterations, train_losses, train_accuracies, val_i
     if val_accuracies and len(val_iterations) == len(val_accuracies):
         ax2.plot(val_iterations, val_accuracies, 'r-', linewidth=2, label='Validation Accuracy')
     elif val_accuracies:
-        # 如果维度不匹配，使用训练迭代次数作为x轴
         ax2.plot(iterations[:len(val_accuracies)], val_accuracies, 'r-', linewidth=2, label='Validation Accuracy')
     ax2.set_xlabel('Iterations')
     ax2.set_ylabel('Accuracy (%)')
@@ -299,4 +298,32 @@ def plot_training_curves(args, iterations, train_losses, train_accuracies, val_i
         print(f"Training data saved to: {data_path}")
     
     plt.close()
+    
+import os
+import matplotlib.pyplot as plt
+
+def plot_ga_progress_from_log(generation_log, args):
+    if not generation_log:
+        return
+
+    result_dir = getattr(args, "result_path", ".")
+    os.makedirs(result_dir, exist_ok=True)
+
+    gens = [d.get("generation", i) for i, d in enumerate(generation_log)]
+    best = [d.get("best_fitness", None) for d in generation_log]
+    val  = [d.get("val_acc", None)      for d in generation_log]
+
+    fig = plt.figure()
+    plt.plot(gens, best, label="Best fitness")
+    plt.plot(gens, val,  label="Val acc")
+    plt.xlabel("Generation")
+    plt.ylabel("Accuracy / Fitness")
+    plt.title("GA Evolution Progress")
+    plt.legend()
+
+    out_png = os.path.join(result_dir, "ga_progress.png")
+
+    plt.savefig(out_png, dpi=200, bbox_inches="tight")
+    plt.close()
+
 

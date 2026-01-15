@@ -1,9 +1,5 @@
-import os
-import sys
-import json
 import torch
 import torch.nn.functional as F
-import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 
@@ -11,29 +7,37 @@ from utils import *
 
 from loralib.utils import mark_only_lora_as_trainable, apply_lora, get_lora_parameters, lora_state_dict, save_lora, load_lora
 
-def run_lora_sgd(args, clip_model, logit_scale, dataset, train_from_ga=True):
+def run_lora_sgd(args, clip_model, logit_scale, dataset, device_id, momentum = True):
     
     VALIDATION = True
   
     list_lora_layers = apply_lora(args, clip_model)
-    if train_from_ga:
-        # 和 Adam 版本保持一致，从 GA 的 LoRA 开始训练（方便公平对比）
-        args.opt = 'ga'
-        load_lora(args, list_lora_layers)
 
-    torch.cuda.set_device(7)
+    torch.cuda.set_device(device_id)
     clip_model = clip_model.cuda()
     mark_only_lora_as_trainable(clip_model)
     total_iters = args.n_iters * args.shots
 
     # ========= 核心区别：使用带动量的 SGD =========
-    optimizer = torch.optim.SGD(
-        get_lora_parameters(clip_model),
-        lr=args.lr,
-        momentum=0.9,
-        weight_decay=1e-2,   # 和 AdamW 设置相同，方便对比
-        nesterov=True        # 如不想用 Nesterov，可改为 False
-    )
+    if momentum:
+        print("Using SGD with momentum.")
+        optimizer = torch.optim.SGD(
+            get_lora_parameters(clip_model),
+            lr=args.lr,
+            momentum=0.9,
+            weight_decay=1e-2,   # 和 AdamW 设置相同，方便对比
+            nesterov=True        # 如不想用 Nesterov，可改为 False
+        )
+        args.opt = 'sgd_momentum'
+    else:
+        print("Using vanilla SGD without momentum.")
+        optimizer = torch.optim.SGD(
+            get_lora_parameters(clip_model),
+            lr=args.lr,
+            momentum=False,
+            weight_decay=1e-2,   # 和 AdamW 设置相同，方便对比
+            nesterov=False        # 如不想用 Nesterov，可改为 False
+        )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         total_iters,

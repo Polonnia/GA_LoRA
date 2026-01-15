@@ -8,9 +8,11 @@ from datasets.utils import build_data_loader
 from utils import *
 from run_utils import *
 from sgd import run_lora_sgd
-from lora_adam import run_lora_adam
-from ga import run_lora_ga
-from loralib.utils import mark_only_lora_as_trainable, apply_lora, get_lora_parameters, lora_state_dict, save_lora, load_lora
+from adam import run_lora_adam
+from ga_bak_1212 import run_lora_ga
+from sam import run_lora_sam
+from zo_sgd import run_lora_zo
+from loralib.utils import apply_lora, load_lora
 
 def main():
 
@@ -22,7 +24,7 @@ def main():
     
     logit_scale = 100
 
-    shots_list = [8]
+    shots_list = [16]
     base_result_path = getattr(args, 'result_path', None)
     
     # # Zero-shot CLIP evaluation before training
@@ -111,16 +113,25 @@ def main():
         
         if args.opt == 'adam':
             print("Running LoRA with AdamW optimization")
-            run_lora_adam(args, clip_model, logit_scale, dataset, device_id=args.gpu_ids[0], train_from_ga=False)
+            run_lora_adam(args, clip_model, logit_scale, dataset, device_id=5, train_from_ga=args.train_from_ga, finetune_full=True)
         elif args.opt == 'sgd':
             print("Running LoRA with SGD optimization")
-            run_lora_sgd(args, clip_model, logit_scale, dataset, train_from_ga=False)
+            run_lora_sgd(args, clip_model, logit_scale, dataset, device_id=5)
         elif args.opt == 'ga':
             print("Running LoRA with GA optimization")
-            run_lora_ga(args, clip_model, dataset, gpu_ids=args.gpu_ids) #, num_proc_per_gpu=4
+            run_lora_ga(args, clip_model, dataset, gpu_ids=args.gpu_ids)
+        elif args.opt == 'sam':
+            print("Running LoRA with SAM optimization")
+            run_lora_sam(args, clip_model, logit_scale, dataset, device_id=7)
+        elif args.opt == 'zo':
+            print("Running LoRA with ZO-SGD optimization")
+            run_lora_zo(args, clip_model, logit_scale, dataset, device_id=7)
         else:
             raise ValueError("Unknown optimization method specified. Use 'sgd', 'adam' or 'ga'.")
         
+        print(f"Evaluating LoRA model for {args.opt} on {args.dataset}.")
+        list_lora_layers = apply_lora(args, clip_model)
+        load_lora(args, list_lora_layers)
         target_device = torch.device(f"cuda:{args.gpu_ids[0]}") 
         clip_model = clip_model.to(target_device)
         evaluate(clip_model, args.opt, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
