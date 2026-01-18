@@ -186,13 +186,13 @@ class ImageNet():
         self.train_x = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'train')), transform=preprocess)
         
         if train_only:
-            # train_only=True: 只创建训练集
+            # train_only=True:
             self.val = None
             self.test = None
             self.val_loader = None
             self.test_loader = None
         else:
-            # train_only=False: 创建训练集、验证集和测试集
+            # train_only=False:
             self.val = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'train')), transform=preprocess)
             self.test = datasets.ImageFolder(os.path.join(os.path.join(self.dataset_dir, 'val')), transform=preprocess)
         
@@ -269,7 +269,7 @@ class ImageNet():
         self.train_x.targets = targets
         self.train_x.samples = imgs
         
-        # 创建训练数据加载器
+        # 创建�?练数�?加载�?
         self.train_loader = torch.utils.data.DataLoader(
             self.train_x, 
             batch_size=batch_size, 
@@ -299,7 +299,7 @@ class ImageNet():
                 pin_memory=True
             )
         else:
-            # train_only=True 时不创建验证集和测试集
+            # train_only=True 时不创建验证集和测试�?
             self.val = None
             self.test = None
             self.val_loader = None

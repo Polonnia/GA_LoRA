@@ -229,7 +229,6 @@ def crossover_arithmetic(parent1: Chromosome, parent2: Chromosome) -> Chromosome
     child.enabled_lora = list(parent1.enabled_lora)
     child.genes = []
     
-    # alpha 是混合比例，通常在 0.4 - 0.6 之间随机，或者固定 0.5
     alpha = 0.5
     
     for g1, g2 in zip(parent1.genes, parent2.genes):

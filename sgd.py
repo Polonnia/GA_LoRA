@@ -23,7 +23,7 @@ def run_lora_sgd(args, clip_model, logit_scale, dataset, device_id, momentum = T
         print("Using SGD with momentum.")
         optimizer = torch.optim.SGD(
             get_lora_parameters(clip_model),
-            lr=args.lr,
+            lr=0.001,
             momentum=0.9,
             weight_decay=1e-2,   # 和 AdamW 设置相同，方便对比
             nesterov=True        # 如不想用 Nesterov，可改为 False
@@ -33,7 +33,7 @@ def run_lora_sgd(args, clip_model, logit_scale, dataset, device_id, momentum = T
         print("Using vanilla SGD without momentum.")
         optimizer = torch.optim.SGD(
             get_lora_parameters(clip_model),
-            lr=args.lr,
+            lr=0.005,
             momentum=False,
             weight_decay=1e-2,   # 和 AdamW 设置相同，方便对比
             nesterov=False        # 如不想用 Nesterov，可改为 False

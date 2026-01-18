@@ -24,7 +24,7 @@ def main():
     
     logit_scale = 100
 
-    shots_list = [16]
+    shots_list = [1,32,64]
     base_result_path = getattr(args, 'result_path', None)
     
     # # Zero-shot CLIP evaluation before training
@@ -105,7 +105,7 @@ def main():
                 print(f"Evaluating LoRA model for shots={s}.")
                 list_lora_layers = apply_lora(args, clip_model)
                 load_lora(args, list_lora_layers)
-                target_device = torch.device(f"cuda:{args.gpu_ids[0]}") 
+                target_device = torch.device(f"cuda:{args.gpu_ids[3]}") 
                 clip_model = clip_model.to(target_device)
                 clip_model.eval()
                 evaluate(clip_model, args.opt, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
@@ -113,16 +113,16 @@ def main():
         
         if args.opt == 'adam':
             print("Running LoRA with AdamW optimization")
-            run_lora_adam(args, clip_model, logit_scale, dataset, device_id=5, train_from_ga=args.train_from_ga, finetune_full=True)
+            run_lora_adam(args, clip_model, logit_scale, dataset, device_id=6, train_from_ga=args.train_from_ga, finetune_full=False)
         elif args.opt == 'sgd':
             print("Running LoRA with SGD optimization")
-            run_lora_sgd(args, clip_model, logit_scale, dataset, device_id=5)
+            run_lora_sgd(args, clip_model, logit_scale, dataset, device_id=7, momentum=False)
         elif args.opt == 'ga':
             print("Running LoRA with GA optimization")
             run_lora_ga(args, clip_model, dataset, gpu_ids=args.gpu_ids)
         elif args.opt == 'sam':
             print("Running LoRA with SAM optimization")
-            run_lora_sam(args, clip_model, logit_scale, dataset, device_id=7)
+            run_lora_sam(args, clip_model, logit_scale, dataset, device_id=5)
         elif args.opt == 'zo':
             print("Running LoRA with ZO-SGD optimization")
             run_lora_zo(args, clip_model, logit_scale, dataset, device_id=7)

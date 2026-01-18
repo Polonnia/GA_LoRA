@@ -49,8 +49,10 @@ def run_lora_adam(args, clip_model, logit_scale, dataset, device_id, train_from_
         mark_only_lora_as_trainable(clip_model)
         params_to_optimize = get_lora_parameters(clip_model)
 
-    total_iters = args.n_iters * args.shots
-
+    if args.shots != -1:
+        total_iters = args.n_iters * args.shots
+    else:
+        total_iters = args.n_iters
     # Use AdamW for weight decay handling
     optimizer = torch.optim.AdamW(params_to_optimize, weight_decay=1e-2, betas=(0.9, 0.999), lr=args.lr)
     

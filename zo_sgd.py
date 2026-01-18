@@ -57,7 +57,7 @@ def run_lora_zo(args, clip_model, logit_scale, dataset, device_id):
 
     # ZO hyperparams (with safe defaults)
     mu = float(getattr(args, "mu", 1e-3))                 # smoothing / perturb radius
-    q = int(getattr(args, "zo_samples", 2))               # number of random directions per step
+    q = int(getattr(args, "zo_samples", 50))               # number of random directions per step
     lr = float(getattr(args, "lr", 1e-3))
     weight_decay = float(getattr(args, "weight_decay", 1e-2))
     eps = 1e-12
