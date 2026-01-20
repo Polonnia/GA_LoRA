@@ -16,7 +16,7 @@ def get_arguments():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', default=1, type=int)
-    parser.add_argument("--gpu_ids", default=[1,2,3,4,5], type=list)
+    parser.add_argument("--gpu_ids", default=[4,5,6,7], type=list)
     # Dataset arguments
     parser.add_argument('--root_path', type=str, default='/data/dataset', help='path to dataset root directory')
     parser.add_argument('--dataset', type=str, default='imagenet')
@@ -43,6 +43,13 @@ def get_arguments():
     parser.add_argument('--result_path', default='/home/dingzijin/results', type=str, help='directory to save validation results (e.g., accuracies)')
     parser.add_argument('--eval_datasets', default='imagenet-a,imagenet-r,imagenet-v2,imagenet-sketch', type=lambda x: x.split(','), help='comma-separated list of eval datasets, e.g. imagenet-v2,imagenet-a,imagenet-r')
     parser.add_argument('--train_from_ga', default=False, action='store_true', help='whether to load LoRA weights trained from GA as initialization')
+    
+    # Sharpness
+    parser.add_argument('--rho', default=0.0002, type=float, help='Perturbation radius')
+    parser.add_argument('--sharpness_iters', default=20, type=int, help='Number of PGD iterations')
+    parser.add_argument('--step_size_mult', default=1.0, type=float)
+    parser.add_argument('--norm', default='l2', choices=['l2', 'linf'])
+    parser.add_argument('--n_eval_samples', default=1000, type=int, help='Num samples to eval')
     args = parser.parse_args()
 
     return args

@@ -11,7 +11,7 @@ from sgd import run_lora_sgd
 from adam import run_lora_adam
 from ga_bak_1212 import run_lora_ga
 from sam import run_lora_sam
-from zo_sgd import run_lora_zo
+from entropy_SGD import run_lora_entropy_sgd
 from loralib.utils import apply_lora, load_lora
 
 def main():
@@ -24,7 +24,7 @@ def main():
     
     logit_scale = 100
 
-    shots_list = [1,32,64]
+    shots_list = [64]
     base_result_path = getattr(args, 'result_path', None)
     
     # # Zero-shot CLIP evaluation before training
@@ -116,18 +116,21 @@ def main():
             run_lora_adam(args, clip_model, logit_scale, dataset, device_id=6, train_from_ga=args.train_from_ga, finetune_full=False)
         elif args.opt == 'sgd':
             print("Running LoRA with SGD optimization")
-            run_lora_sgd(args, clip_model, logit_scale, dataset, device_id=7, momentum=False)
+            run_lora_sgd(args, clip_model, logit_scale, dataset, device_id=5, momentum=False)
+        elif args.opt == 'sgd_momentum':
+            print("Running LoRA with SGD with momentum optimization")
+            run_lora_sgd(args, clip_model, logit_scale, dataset, device_id=4, momentum=True)
+        elif args.opt == 'entropy_sgd':
+            print("Running LoRA with Entropy-SGD optimization")
+            run_lora_entropy_sgd(args, clip_model, logit_scale, dataset, device_id=1)
         elif args.opt == 'ga':
             print("Running LoRA with GA optimization")
             run_lora_ga(args, clip_model, dataset, gpu_ids=args.gpu_ids)
         elif args.opt == 'sam':
             print("Running LoRA with SAM optimization")
-            run_lora_sam(args, clip_model, logit_scale, dataset, device_id=5)
-        elif args.opt == 'zo':
-            print("Running LoRA with ZO-SGD optimization")
-            run_lora_zo(args, clip_model, logit_scale, dataset, device_id=7)
+            run_lora_sam(args, clip_model, logit_scale, dataset, device_id=4)
         else:
-            raise ValueError("Unknown optimization method specified. Use 'sgd', 'adam' or 'ga'.")
+            raise ValueError("Unknown optimization method specified.")
         
         print(f"Evaluating LoRA model for {args.opt} on {args.dataset}.")
         list_lora_layers = apply_lora(args, clip_model)

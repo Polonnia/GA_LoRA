@@ -269,7 +269,6 @@ class ImageNet():
         self.train_x.targets = targets
         self.train_x.samples = imgs
         
-        # 创建�?练数�?加载�?
         self.train_loader = torch.utils.data.DataLoader(
             self.train_x, 
             batch_size=batch_size, 
