@@ -214,10 +214,6 @@ class ImageNet():
                 )
             else:
                 self.test_loader = None
-            
-            print(f"ImageNet Dataset Statistics (shots={num_shots}, train_only={train_only}):")
-            if not train_only:
-                print(f"  Test: {len(self.test.imgs)} samples")
             return
         
         # For num_shots > 0, proceed with normal few-shot split
@@ -278,7 +274,6 @@ class ImageNet():
         )
         
         if not train_only:
-            # train_only=False 时创建验证集和测试集
             self.val.imgs = imgs_val
             self.val.targets = targets_val
             self.val.samples = imgs_val
@@ -298,17 +293,10 @@ class ImageNet():
                 pin_memory=True
             )
         else:
-            # train_only=True 时不创建验证集和测试�?
             self.val = None
             self.test = None
             self.val_loader = None
             self.test_loader = None
-        
-        print(f"ImageNet Dataset Statistics (shots={num_shots}, train_only={train_only}):")
-        print(f"  Train: {len(imgs)} samples")
-        if not train_only:
-            print(f"  Val: {len(imgs_val)} samples")
-            print(f"  Test: {len(self.test.imgs)} samples")
 
     def name(self):
         return 'imagenet'

@@ -11,40 +11,51 @@ from loralib.utils import apply_lora, load_lora, mark_only_lora_as_trainable
 from loralib.layers import LoRALayer
 from run_utils import *
 
+# --- 辅助函数：保存结果 ---
+def save_result(file_path, opt, shots, sharpness_type, rho, value):
+    """
+    将结果追加写入到文件中
+    格式: [Optimizer] [Shots] [Type] Rho=... Value=...
+    """
+        
+    file_name = "sharpness_results.txt"
+    file_path = os.path.join(file_path, file_name)
+    
+    line = f"Opt: {opt}, Shots: {shots}, Type: {sharpness_type}, Rho: {rho}, Sharpness: {value:.6f}\n"
+    
+    try:
+        with open(file_path, 'a') as f:
+            f.write(line)
+        print(f"Saved to {file_path}: {line.strip()}")
+    except Exception as e:
+        print(f"Error saving result: {e}")
+
 # --- 核心组件 1: CLIP 分类包装器 ---
-# 将 CLIP 包装成标准的 input -> logits 模型，固定文本分类器
 class CLIPClassifierWrapper(nn.Module):
     def __init__(self, clip_model, text_features, logit_scale=100.0):
         super().__init__()
         self.clip_model = clip_model
-        # 注册为 buffer，不参与梯度更新
         self.register_buffer('text_features', text_features)
         self.logit_scale = logit_scale
 
     def forward(self, images):
-        # 提取图像特征 (这里会用到 LoRA 参数)
         image_features = self.clip_model.encode_image(images)
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-        
-        # 计算 Logits
         logits = self.logit_scale * image_features @ self.text_features.t()
         return logits
 
-# --- 核心组件 2: 独立的 Sharpness 计算逻辑 ---
+# --- 核心组件 2: Worst-Case Sharpness 计算 (原有逻辑) ---
 def calc_worst_case_sharpness(model, dataloader, rho, n_iters, norm, device):
     """
-    计算 Worst-Case Sharpness，仅针对 requires_grad=True 的参数 (LoRA)。
+    计算 Adaptive Worst-Case Sharpness (S_max)
     """
     model.eval()
-    
     for m in model.modules():
         if isinstance(m, LoRALayer):
             m.lora_train(True)
             
     loss_fn = nn.CrossEntropyLoss()
     
-    # 1. 筛选 LoRA 参数
-    # 保存原始参数的引用和数据，用于计算后恢复
     orig_params = {
         name: p.clone().detach() 
         for name, p in model.named_parameters() 
@@ -52,117 +63,149 @@ def calc_worst_case_sharpness(model, dataloader, rho, n_iters, norm, device):
     }
     
     if len(orig_params) == 0:
-        print("Warning: No trainable parameters found! Sharpness will be 0.")
         return 0.0
 
-    avg_loss = 0.0
-    avg_init_loss = 0.0
+    avg_sharpness = 0.0
     n_batches = 0
-    
-    # 步长设置
-    step_size = rho * 2.0 / n_iters 
+    step_size_ratio = 2.0 / n_iters 
 
     for i, (images, labels) in enumerate(dataloader):
         images, labels = images.to(device), labels.to(device)
-        
-        # 计算该 Batch 的初始 Loss
+
+        # 1. 计算原始 Loss
         model.zero_grad()
         with torch.no_grad():
-            init_output = model(images)
-            init_loss = loss_fn(init_output, labels).item()
-        avg_init_loss += init_loss
-
-        # --- APGD / PGD 攻击循环 ---
+            output_init = model(images)
+            loss_init = loss_fn(output_init, labels)
         
-        # 初始化扰动 (随机)
+        # 2. 初始化随机扰动
         delta_dict = {}
         for name, p in orig_params.items():
-            delta = torch.randn_like(p).to(device)
-            if norm == 'l2':
-                delta = delta / (delta.norm() + 1e-12) * rho
-            elif norm == 'linf':
-                delta = delta.sign() * rho
-            delta_dict[name] = delta
-            
-        worst_loss_batch = init_loss
+            rand_sign = torch.randint_like(p, high=2) * 2 - 1 
+            if norm == 'linf':
+                # Adaptive: rho * |w|
+                delta = rand_sign * rho * (p.abs() + 1e-12)
+            else:
+                delta = torch.randn_like(p) * rho # 简化处理 L2
+            delta_dict[name] = delta.to(device)
 
+        # 3. PGD 攻击寻找最大 Loss
+        worst_loss = loss_init.item() # 至少是初始 loss
+        
         for _ in range(n_iters):
-            # A. 应用扰动
+            # Apply
             for name, p in model.named_parameters():
                 if name in delta_dict:
                     p.data = orig_params[name] + delta_dict[name]
             
-            # B. 前向传播 & 计算梯度
+            # Backward
             model.zero_grad()
             output = model(images)
             loss = loss_fn(output, labels)
             loss.backward()
             
-            # C. 梯度上升 (更新扰动)
+            # Update & Project
             with torch.no_grad():
-                if norm == 'l2':
-                    # 计算所有 LoRA 参数的梯度的总范数
-                    grad_norm = torch.norm(torch.stack([
-                        p.grad.norm() for name, p in model.named_parameters() if name in delta_dict and p.grad is not None
-                    ]))
-                    
-                    for name, p in model.named_parameters():
-                        if name in delta_dict and p.grad is not None:
-                            # 归一化梯度并上升
-                            g = p.grad / (grad_norm + 1e-12)
-                            delta_dict[name] += step_size * g
-                            
-                elif norm == 'linf':
-                    for name, p in model.named_parameters():
-                        if name in delta_dict and p.grad is not None:
-                            delta_dict[name] += step_size * p.grad.sign()
+                current_loss_val = loss.item()
+                if current_loss_val > worst_loss:
+                    worst_loss = current_loss_val
 
-            # D. 投影 (Projection)
-            with torch.no_grad():
-                if norm == 'l2':
-                    # 计算当前总扰动范数
-                    delta_total_norm = torch.norm(torch.stack([
-                        d.norm() for d in delta_dict.values()
-                    ]))
-                    if delta_total_norm > rho:
-                        scale = rho / (delta_total_norm + 1e-12)
-                        for name in delta_dict:
-                            delta_dict[name] *= scale
-                elif norm == 'linf':
-                    for name in delta_dict:
-                        delta_dict[name] = torch.clamp(delta_dict[name], -rho, rho)
-
-            # E. 记录最坏 Loss (可选：每次 step 都检查一下)
-            with torch.no_grad():
                 for name, p in model.named_parameters():
-                    if name in delta_dict:
-                        p.data = orig_params[name] + delta_dict[name]
-                curr_loss = loss_fn(model(images), labels).item()
-                if curr_loss > worst_loss_batch:
-                    worst_loss_batch = curr_loss
+                    if name in delta_dict and p.grad is not None:
+                        w_abs = orig_params[name].abs() + 1e-12
+                        if norm == 'linf':
+                            step = step_size_ratio * rho * w_abs * p.grad.sign()
+                            delta_dict[name] += step
+                            max_delta = rho * w_abs
+                            delta_dict[name] = torch.max(torch.min(delta_dict[name], max_delta), -max_delta)
 
-        # 恢复原始参数，准备下一个 Batch
+        # 恢复参数
         for name, p in model.named_parameters():
             if name in orig_params:
                 p.data = orig_params[name]
         
-        avg_loss += worst_loss_batch
+        # 4. 计算 Sharpness = Max Loss - Initial Loss
+        avg_sharpness += (worst_loss - loss_init.item())
         n_batches += 1
 
-    return (avg_loss - avg_init_loss) / n_batches
+    return avg_sharpness / n_batches
+
+# --- 核心组件 3: Adaptive Average-Case Sharpness 计算 (新增) ---
+def calc_adaptive_average_sharpness(model, dataloader, rho, n_samples, device):
+    """
+    计算 Adaptive Average-Case Sharpness (S_avg)
+    原理: E[L(w + noise)] - L(w)
+    其中 noise ~ N(0, (rho * |w|)^2)
+    """
+    model.eval()
+    for m in model.modules():
+        if isinstance(m, LoRALayer):
+            m.lora_train(True)
+    loss_fn = nn.CrossEntropyLoss()
+
+    # 1. 保存原始参数
+    orig_params = {
+        name: p.clone().detach() 
+        for name, p in model.named_parameters() 
+        if p.requires_grad
+    }
+    
+    if len(orig_params) == 0:
+        return 0.0
+
+    total_sharpness = 0.0
+    n_batches = 0
+
+    print(f"Calculating Adaptive Average Sharpness (Samples={n_samples}, Rho={rho})...")
+
+    with torch.no_grad(): # 全程不需要梯度
+        for i, (images, labels) in enumerate(dataloader):
+            images, labels = images.to(device), labels.to(device)
+
+            # A. 计算原始 Loss
+            output_init = model(images)
+            loss_init = loss_fn(output_init, labels).item()
+
+            loss_perturbed_sum = 0.0
+
+            # B. 蒙特卡洛采样 (Monte Carlo Sampling)
+            for _ in range(n_samples):
+                # 施加高斯噪声
+                for name, p in model.named_parameters():
+                    if name in orig_params:
+                        # 核心: Adaptive Noise
+                        # noise ~ N(0, 1) * rho * |w|
+                        # 这里的 rho 充当了 sigma 的缩放系数
+                        w_abs = orig_params[name].abs() + 1e-12
+                        noise = torch.randn_like(p) * rho * w_abs
+                        p.data = orig_params[name] + noise
+                
+                # 计算扰动后的 Loss
+                output_perturbed = model(images)
+                loss_perturbed = loss_fn(output_perturbed, labels).item()
+                loss_perturbed_sum += loss_perturbed
+
+            # C. 恢复参数 (为下一个 Batch 做准备)
+            for name, p in model.named_parameters():
+                if name in orig_params:
+                    p.data = orig_params[name]
+
+            # D. 计算当前 Batch 的 Sharpness
+            # Sharpness = Average Perturbed Loss - Initial Loss
+            avg_perturbed_loss = loss_perturbed_sum / n_samples
+            total_sharpness += (avg_perturbed_loss - loss_init)
+            n_batches += 1
+
+    return total_sharpness / n_batches
 
 def main():
     args = get_arguments()
-    args.shots = 2
     set_random_seed(args.seed)
-    gpu_id = 5
-    device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{args.gpu_ids[0]}" if torch.cuda.is_available() else "cpu")
     
-    print(f"Loading CLIP backbone: {args.backbone}")
     clip_model, preprocess = clip.load(args.backbone, device=device)
-
+    print(f"evaluating {args.opt} for shot = {args.shots}\n")
     # 1. apply LoRA
-    print("Applying LoRA structure...")
     list_lora_layers = apply_lora(args, clip_model)
     clip_model.to(device)  
     mark_only_lora_as_trainable(clip_model)
@@ -170,15 +213,10 @@ def main():
     load_lora(args, list_lora_layers)
     
     # 3. 准备数据
-    print(f"Preparing dataset: {args.dataset}")
-    # 这里为了简便，我们只取 test set 或 val set 的一部分
     dataset = build_dataset(args.dataset, args.root_path, 1, preprocess, args.batch_size)
     
-    # 获取类别文本特征
     print("Building zero-shot classifier...")
-    classnames = dataset.classnames # 根据 datasets/imagenet.py 等调整
-
-    # 简单的 Prompt 模板
+    classnames = dataset.classnames 
     templates = ["a photo of a {}."] 
     
     with torch.no_grad():
@@ -194,35 +232,70 @@ def main():
         zeroshot_weights = torch.stack(zeroshot_weights, dim=1).to(device)
     
     # 4. 构建 Sharpness 计算模型
-    # 此时 model 的 forward 输入图片，输出 Logits
-    sharpness_model = CLIPClassifierWrapper(clip_model, zeroshot_weights.t()) # wrapper 期望 (N_classes, Dim)
+    sharpness_model = CLIPClassifierWrapper(clip_model, zeroshot_weights.t())
     
-    # 准备 DataLoader (只评测一部分数据以节省时间)
-    if hasattr(dataset, 'test'):
-        data_source = dataset.test
+    if hasattr(dataset, 'train'):
+        data_source = dataset.train
     else:
         data_source = dataset.val
         
-    # 如果数据量太大，可以截断
     indices = list(range(min(len(data_source), args.n_eval_samples)))
     subset = torch.utils.data.Subset(data_source, indices)
     loader = torch.utils.data.DataLoader(subset, batch_size=args.batch_size, shuffle=False, num_workers=4)
     
-    # 5. 计算 Sharpness
+    # 5. 计算 Sharpness 对比
+    print("\n" + "="*50)
+    print(f"Starting Sharpness Evaluation for {args.opt} ({args.shots} shots)")
+    print(f"Results will be appended to: {args.result_path}")
+    print("="*50)
+
+    rhos_worst = [0.002, 0.001, 0.0005, 0.0002] 
+    rhos_avg = [0.2, 0.1, 0.05, 0.01]
     
-    #for r in [0.005, 0.002, 0.001, 0.0005, 0.0002, 0.0001]:
-    for r in [0.005,0.001,0.0005,0.0001,0.00005,0.00001]:
-        args.rho = r
-        sharpness_val = calc_worst_case_sharpness(
+    # --- Worst-Case Sharpness Loop ---
+    for r in rhos_worst:
+        print(f"\n--- Testing Worst-Case Rho = {r} ---")
+        s_max = calc_worst_case_sharpness(
             sharpness_model, 
             loader, 
-            rho=args.rho, 
+            rho=r, 
             n_iters=args.sharpness_iters, 
-            norm=args.norm, 
+            norm='linf', 
             device=device
         )
+        print(f"[Result] Worst-Case Sharpness (S_max): {s_max:.6f}")
+        
+        # 保存结果
+        save_result(
+            args.result_path, 
+            opt=args.opt, 
+            shots=args.shots, 
+            sharpness_type="Worst-Case", 
+            rho=r, 
+            value=s_max
+        )
 
-        print(f"opt = {args.opt}, rho = {args.rho}: {sharpness_val:.6f}\n")
+    # --- Average-Case Sharpness Loop ---
+    for r in rhos_avg:
+        print(f"\n--- Testing Average-Case Rho = {r} ---")
+        s_avg = calc_adaptive_average_sharpness(
+            sharpness_model, 
+            loader, 
+            rho=r, 
+            n_samples=20, 
+            device=device
+        )
+        print(f"[Result] Average-Case Sharpness (S_avg): {s_avg:.6f}")
+        
+        # 保存结果
+        save_result(
+            args.result_path, 
+            opt=args.opt, 
+            shots=args.shots, 
+            sharpness_type="Average-Case", 
+            rho=r, 
+            value=s_avg
+        )
 
 if __name__ == '__main__':
     main()

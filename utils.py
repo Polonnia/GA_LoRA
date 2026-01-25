@@ -203,6 +203,126 @@ def evaluate(clip_model, opt, dataset, eval_datasets, result_path, seed, root_pa
         json.dump(exist, f, indent=2)
     return
 
+def evaluate_objectnet(model, data_loader, device, objectnet_obj=None, result_path=None, opt=None, seed=None, print_freq=10):
+    model.eval()
+    
+    class AverageMeter(object):
+        def __init__(self):
+            self.reset()
+        def reset(self):
+            self.val = 0; self.avg = 0; self.sum = 0; self.count = 0
+        def update(self, val, n=1):
+            self.val = val
+            self.sum += val * n
+            self.count += n
+            self.avg = self.sum / self.count
+
+    top1 = AverageMeter()
+    
+    # Get text embeddings for ObjectNet classes
+    text_features = None
+    classnames = None
+    
+    # Try to get classnames from ObjectNet object or dataset
+    if objectnet_obj is not None and hasattr(objectnet_obj, 'classnames'):
+        classnames = objectnet_obj.classnames
+    elif hasattr(data_loader.dataset, 'classnames'):
+        classnames = data_loader.dataset.classnames
+    
+    if classnames is not None:
+        template = "a photo of a {}."
+        texts = [template.format(classname.replace('_', ' ')) for classname in classnames]
+        with torch.no_grad():
+            text_tokens = clip.tokenize(texts).to(device)
+            # Handle DataParallel wrapper
+            model_unwrapped = model.module if hasattr(model, 'module') else model
+            text_embeddings = model_unwrapped.encode_text(text_tokens)
+            text_features = text_embeddings / text_embeddings.norm(dim=-1, keepdim=True)
+    
+    with torch.no_grad():
+        for i, (images, targets) in enumerate(data_loader):
+            images = images.to(device)
+            targets = targets.to(device)
+
+            # Use encode_image instead of forward
+            model_unwrapped = model.module if hasattr(model, 'module') else model
+            image_features = model_unwrapped.encode_image(images)
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+            
+            # Compute similarity if we have text features
+            if text_features is not None:
+                output = image_features @ text_features.t()
+            else:
+                output = image_features
+
+            # Project logits using ObjectNet object
+            if objectnet_obj is not None and hasattr(objectnet_obj, 'project_logits'):
+                output = objectnet_obj.project_logits(output, device)
+            elif hasattr(data_loader.dataset, 'project_logits'):
+                output = data_loader.dataset.project_logits(output, device)
+            elif hasattr(data_loader.dataset, 'dataset') and hasattr(data_loader.dataset.dataset, 'project_logits'):
+                output = data_loader.dataset.dataset.project_logits(output, device)
+            
+            acc1 = accuracy_standalone(output, targets, topk=(1,))[0]
+            
+            top1.update(acc1.item(), images.size(0))
+
+    print(f' * ObjectNet Acc@1 {top1.avg:.3f}')
+    
+    # Save results if parameters are provided
+    if result_path is not None and opt is not None and seed is not None:
+        import json
+        import os
+        result_json_path = os.path.join(result_path, f'val_results_{opt}.json')
+        
+        # Load existing results
+        if os.path.exists(result_json_path):
+            try:
+                with open(result_json_path, 'r') as f:
+                    exist = json.load(f)
+            except Exception:
+                exist = {}
+        else:
+            exist = {}
+        
+        # Add ObjectNet result
+        exist.update({f'acc_objectnet_seed{seed}': float(top1.avg)})
+        
+        # Recalculate average accuracy for the 5 standard variants + objectnet
+        variant_list = ['imagenet-a', 'imagenet-r', 'imagenet-sketch', 'imagenet-v2', 'objectnet']
+        variant_accs = []
+        for variant in variant_list:
+            key = f'acc_{variant}_seed{seed}'
+            if key in exist:
+                variant_accs.append(exist[key])
+        
+        if len(variant_accs) > 0:
+            avg_acc = sum(variant_accs) / len(variant_accs)
+            exist.update({f'avg_acc_variants_seed{seed}': float(avg_acc)})
+        
+        # Save updated results
+        os.makedirs(result_path, exist_ok=True)
+        with open(result_json_path, 'w') as f:
+            json.dump(exist, f, indent=2)
+        print(f"Results saved to {result_json_path}")
+    
+    return top1.avg
+
+def accuracy_standalone(output, target, topk=(1,)):
+    with torch.no_grad():
+        maxk = max(topk)
+        batch_size = target.size(0)
+
+        _, pred = output.topk(maxk, 1, True, True)
+        pred = pred.t()
+        correct = pred.eq(target.view(1, -1).expand_as(pred))
+
+        res = []
+        for k in topk:
+            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
+            res.append(correct_k.mul_(100.0 / batch_size))
+        return res
+
 def _build_clip_preprocess():
     # Minimal CLIP-like eval preprocess
     import torchvision.transforms as transforms
@@ -298,32 +418,3 @@ def plot_training_curves(args, iterations, train_losses, train_accuracies, val_i
         print(f"Training data saved to: {data_path}")
     
     plt.close()
-    
-import os
-import matplotlib.pyplot as plt
-
-def plot_ga_progress_from_log(generation_log, args):
-    if not generation_log:
-        return
-
-    result_dir = getattr(args, "result_path", ".")
-    os.makedirs(result_dir, exist_ok=True)
-
-    gens = [d.get("generation", i) for i, d in enumerate(generation_log)]
-    best = [d.get("best_fitness", None) for d in generation_log]
-    val  = [d.get("val_acc", None)      for d in generation_log]
-
-    fig = plt.figure()
-    plt.plot(gens, best, label="Best fitness")
-    plt.plot(gens, val,  label="Val acc")
-    plt.xlabel("Generation")
-    plt.ylabel("Accuracy / Fitness")
-    plt.title("GA Evolution Progress")
-    plt.legend()
-
-    out_png = os.path.join(result_dir, "ga_progress.png")
-
-    plt.savefig(out_png, dpi=200, bbox_inches="tight")
-    plt.close()
-
-

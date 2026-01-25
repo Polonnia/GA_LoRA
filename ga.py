@@ -25,10 +25,10 @@ _GPU_RESOURCES = {}
 # ------------------------------
 # 全局参数
 # ------------------------------
-POPULATION_SIZE = 200
-NUM_GENERATIONS = 500
-NUM_ELITES = 4
-NUM_PARENTS = 40
+POPULATION_SIZE = 100
+NUM_GENERATIONS = 2000
+NUM_ELITES = 2
+NUM_PARENTS = 20
 STD_DEV = 0.1
 SEED = 42
 
@@ -38,7 +38,11 @@ EARLY_STOP_MIN_SAMPLES = 256
 EARLY_STOP_TOLERANCE = 0.1
 
 INITIAL_STD_DEV = 0.01
-FINAL_STD_DEV = 1e-4
+FINAL_STD_DEV = 2e-4
+INITIAL_MUT_RATIO = 1.0
+FINAL_MUT_RATIO = 0.1
+INITIAL_MUT_RATE = 0.1
+FINAL_MUT_RATE = 0.1
 workers_per_gpu = 1 #aojun: 大于1会报错，原因未知
 
 def set_global_seed(seed: int = SEED):
@@ -55,10 +59,10 @@ class MutationScheduler:
         final_std: float = FINAL_STD_DEV,
         total_generations: int = NUM_GENERATIONS,
         schedule_type: str = "linear",
-        initial_ratio: float = 1.0,
-        final_ratio: float = 0.1,
-        initial_rate: float = 0.1,
-        final_rate: float = 0.1,
+        initial_ratio: float = INITIAL_MUT_RATIO,
+        final_ratio: float = FINAL_MUT_RATIO,
+        initial_rate: float = INITIAL_MUT_RATE,
+        final_rate: float = FINAL_MUT_RATE,
     ):
         self.initial_std = initial_std
         self.final_std = final_std
@@ -100,8 +104,7 @@ class MutationScheduler:
 
 
 class Chromosome:
-    def __init__(self, lora_layers: Optional[List[torch.nn.Module]] = None, enabled_lora = ['q','v']):
-        lora_layers = lora_layers or []
+    def __init__(self, lora_layers: List[torch.nn.Module]=[], enabled_lora = ['q','v']):
         self.enabled_lora: List[str] = enabled_lora
         self.fitness: Optional[float] = None
         self.need_update: bool = True
@@ -173,21 +176,66 @@ def crossover_blockwise(parent1: Chromosome, parent2: Chromosome, group_size: in
 
     return child
 
-def crossover_arithmetic(parent1, parent2, group_size=2, alpha=0.5):
+def crossover_blockwise_biased(
+    parent1: Chromosome,
+    parent2: Chromosome,
+    group_size: int = 2,
+    # fitness 差值的“温度/尺度”：越大越接近 0.5；越小越偏向强者
+    fitness_scale: float = 10.0,
+    # 保留多样性：概率下/上限（避免永远只抄一个父代）
+    p_min: float = 0.1,
+    p_max: float = 1.0,
+) -> Chromosome:
+    """
+    Fitness-biased block crossover
+    - genes: [A1,B1,A2,B2,...]
+    - group_size=2 => (A,B) 一起拷贝
+    - p_take_p1 = clamp(0.5 + (f1-f2)/(2*fitness_scale), [p_min,p_max])
+    """
+    assert len(parent1.genes) == len(parent2.genes), "Parents must have same gene length"
+
+    f1 = parent1.fitness if parent1.fitness is not None else -1e9
+    f2 = parent2.fitness if parent2.fitness is not None else -1e9
+
+    scale = max(float(fitness_scale), 1e-8)
+    # 线性映射：diff=0 => 0.5；diff=+scale => 0.75；diff=-scale => 0.25
+    p_take_p1 = 0.5 + (f1 - f2) / (2.0 * scale)
+
+    # clamp
+    p_take_p1 = max(float(p_min), min(float(p_max), p_take_p1))
+
     child = Chromosome()
     child.enabled_lora = list(parent1.enabled_lora)
     child.genes = []
-    child.need_update = True
     child.fitness = None
+    child.need_update = True
 
-    if alpha is None:
-        alpha = random.random()  # 0~1
-
-    for i in range(0, len(parent1.genes), group_size):
+    num_genes = len(parent1.genes)
+    idx = 0
+    while idx < num_genes:
+        src = parent1 if random.random() < p_take_p1 else parent2
         for j in range(group_size):
-            g1 = parent1.genes[i+j]
-            g2 = parent2.genes[i+j]
-            child.genes.append(alpha * g1 + (1 - alpha) * g2)
+            g_idx = idx + j
+            if g_idx >= num_genes:
+                break
+            child.genes.append(src.genes[g_idx].clone())
+        idx += group_size
+
+    return child
+
+
+def crossover_arithmetic(parent1: Chromosome, parent2: Chromosome) -> Chromosome:
+    child = Chromosome()
+    child.enabled_lora = list(parent1.enabled_lora)
+    child.genes = []
+    
+    alpha = 0.5
+    
+    for g1, g2 in zip(parent1.genes, parent2.genes):
+        # 简单的线性插值
+        new_gene = alpha * g1 + (1 - alpha) * g2
+        child.genes.append(new_gene)
+        
     return child
 
 def mutate_one(
@@ -202,12 +250,12 @@ def mutate_one(
     mutated.fitness = None
     mutated.need_update = True
     
-    if random.random() < mutation_rate:
-        for g in mutated.genes:
-            mask = (torch.rand_like(g) < mutation_ratio)
-            if mask.any():
-                noise = torch.randn_like(g) * mutation_std
-                g[mask] += noise[mask]
+    #if random.random() < mutation_rate:
+    for g in mutated.genes:
+        mask = (torch.rand_like(g) < mutation_ratio)
+        if mask.any():
+            noise = torch.randn_like(g) * mutation_std
+            g[mask] += noise[mask]
     return mutated
 
 
@@ -240,14 +288,12 @@ def reproduce(
     while len(new_population) < pop_size:
         # 这里的随机选择模拟了从优良父代中随机交配变异
         # 选两个父母（简单随机，可以改成 tournament selection）
-        parent = random.sample(mating_pool, 1)
-        
-        # 结构感知交叉：以LoRA的(A,B)块为单位拼接
-        #if random.random() < 0.7:
-            #child = crossover_blockwise(parent1, parent2, group_size=2)
-        
-        # 在 child 上进行变异（按当前世代的 rate / ratio / std）
-        child = mutate_one(parent, **mutation_params)
+        if random.random() < 0.3:
+            parent1, parent2 = random.sample(mating_pool, 2)
+            child = crossover_arithmetic(parent1, parent2)
+        else:
+            parent = random.choice(mating_pool)
+            child = mutate_one(parent, **mutation_params)
         new_population.append(child)
         
     return new_population, mutation_params["mutation_std"]
@@ -257,68 +303,45 @@ def reproduce(
 # 核心逻辑修复
 # ------------------------------
 
-def apply_genes_to_layers_fast(
-    genes: List[torch.Tensor],
-    lora_layers: List[torch.nn.Module],
-    enabled_lora: List[str],
-    merge_after_copy: bool = True,   # 评估时建议 True：后续 forward 走 merged 路径更快
-):
+def apply_genes_to_layers_fast(genes: List[torch.Tensor], lora_layers: List[torch.nn.Module], enabled_lora: List[str]):
     """
-    适配你这份 LoRA:
-    - lora_train(True)  => unmerge (sub_lora_data), merged=False
-    - lora_train(False) => merge   (add_lora_data), merged=True
-
-    做到：先统一 unmerge -> 批量 copy A/B -> 最后统一 merge
+    将基因应用到 GPU 上的 LoRA 层。
+    增加 lora_train 切换逻辑以确保 merge 权重正确更新（如果实现依赖它）。
     """
-    # 1) 收集所有需要写入的 LoRA 子模块（顺序必须与 genes 一致）
-    mods = []
-    for layer in lora_layers:
-        for proj in enabled_lora:
-            if proj in ("q", "k", "v"):
-                mod = getattr(layer, f"{proj}_proj", None)
-            elif proj in ("o", "out"):
-                mod = getattr(layer, "proj", None)
-            else:
-                mod = None
-
-            if mod is None:
-                continue
-            if hasattr(mod, "w_lora_A") and hasattr(mod, "w_lora_B"):
-                mods.append(mod)
-
-    needed = 2 * len(mods)
-    if len(genes) < needed:
-        raise ValueError(f"genes too short: got {len(genes)}, need {needed}")
-
+    idx = 0
     with torch.no_grad():
-        # 2) 统一 unmerge：把旧的 LoRA delta 从 weight.data 里减掉，保证基座干净
-        #    注意：lora_train(True) 内部会检查 merged 状态，不会重复 sub
-        for mod in mods:
-            if hasattr(mod, "lora_train"):
-                mod.lora_train(True)  # merged -> False, and sub old delta if needed
-            else:
-                # 极端情况：没有 lora_train，但有 merged/sub/add
-                if getattr(mod, "merged", False) and hasattr(mod, "sub_lora_data"):
-                    mod.sub_lora_data()
-                    mod.merged = False
-
-        # 3) 批量 copy A/B（此时权重还没 merge，新 A/B 只写参数本体）
-        gi = 0
-        for mod in mods:
-            mod.w_lora_A.copy_(genes[gi],   non_blocking=True)
-            mod.w_lora_B.copy_(genes[gi+1], non_blocking=True)
-            gi += 2
-
-        # 4) 统一 merge：把“新 A/B”的 delta 一次性加到 weight.data
-        if merge_after_copy:
-            for mod in mods:
-                if hasattr(mod, "lora_train"):
-                    mod.lora_train(False)  # add new delta, merged=True
+        for layer in lora_layers:
+            # 使用传入的 enabled_lora 列表来确定顺序，与 Chromosome.__init__ 一致
+            for proj in enabled_lora:
+                if proj in ("q", "k", "v"):
+                    mod = getattr(layer, f"{proj}_proj", None)
+                elif proj in ("o", "out"):
+                    mod = getattr(layer, "proj", None)
                 else:
-                    if (not getattr(mod, "merged", False)) and hasattr(mod, "add_lora_data"):
-                        mod.add_lora_data()
-                        mod.merged = True
+                    mod = None
 
+                if mod is None or not (hasattr(mod, "w_lora_A") and hasattr(mod, "w_lora_B")):
+                    continue
+                
+                if idx + 1 >= len(genes):
+                    break
+
+                # 切换到训练模式以便能够修改 A/B
+                if hasattr(mod, 'lora_train'):
+                    mod.lora_train(True)
+                
+                # non_blocking=True 加速 H2D 复制
+                mod.w_lora_A.copy_(genes[idx], non_blocking=True)
+                mod.w_lora_B.copy_(genes[idx+1], non_blocking=True)
+                
+                # 切换回 eval 模式 (这通常会触发 merge)
+                if hasattr(mod, 'lora_train'):
+                    mod.lora_train(False)
+                    # 确保 merge 后的 weight 在正确设备
+                    if hasattr(mod, 'weight') and mod.weight.device != mod.w_lora_A.device:
+                        mod.weight.data = mod.weight.data.to(mod.w_lora_A.device)
+
+                idx += 2
 
 
 def cls_acc(output, target, topk=(1,)):
@@ -388,7 +411,7 @@ def evaluate_worker(chrom_idx: int, chrom_genes: List[torch.Tensor], chrom_enabl
     if encoder_type == 'vision':
         # Text features 已经在 init_gpu_resources 计算好并放在 GPU 上
         text_features = cache['text_features'] # [N_cls, Dim]
-        # data_loader = cache['train_loader']    # 实际的数据加载器
+        data_loader = cache['train_loader']    # 实际的数据加载器
         
         #key
         preloaded_images = cache['preloaded_images']
@@ -422,7 +445,7 @@ def evaluate_worker(chrom_idx: int, chrom_genes: List[torch.Tensor], chrom_enabl
                 tot_samples += batch_size
                 correct_samples += batch_correct
 
-                # 早停检查
+                # 早停检查（使用正确样本数）
                 if early_enabled and early_target is not None and tot_samples >= early_min:
                     # 剩余最多还能看到多少样本
                     remaining = max(early_dataset - tot_samples, 0)
@@ -627,8 +650,44 @@ def init_gpu_resources(args, clip_model_base, dataset, gpu_ids: List[int]):
 
     print("Resources initialized.")
 
+def save_mating_pool_lora(
+    args,
+    res_main: dict,
+    mating_pool: List[Chromosome],
+    prefix: str = "mp_final",
+):
+    """
+    保存 mating pool 中每个个体对应的 LoRA 权重。
+    通过临时修改 args.filename 来生成不同文件名。
+    """
+    if not getattr(args, "save_path", None):
+        print("[GA] args.save_path is None, skip saving mating pool.")
+        return
+    
+    # 额外保存一个索引，便于对照 fitness
+    old_save_path = args.save_path
+    save_root = os.path.join(old_save_path, "mating_pool")
+    os.makedirs(save_root, exist_ok=True)
+    args.save_path = save_root
+    old_filename = getattr(args, "filename", "default")
 
-def run_lora_ga(args, clip_model, dataset, gpu_ids=[0]):
+    for i, ind in enumerate(mating_pool):
+        fit = ind.fitness if ind.fitness is not None else -1.0
+
+        # 将该个体基因应用到主 GPU 模型的 LoRA 层
+        apply_genes_to_layers_fast(ind.genes, res_main["lora_layers"], ind.enabled_lora)
+
+        # 生成唯一文件名：包含序号与 fitness（可选）
+        safe_fit = f"{fit:.4f}".replace(".", "p")
+        args.filename = f"{old_filename}_{prefix}_{i:03d}_fit{safe_fit}"
+
+        save_lora(args, res_main["lora_layers"])  # 使用现有 save_lora 逻辑落盘
+
+    # 恢复 filename，避免影响后续流程
+    args.save_path = old_save_path
+    args.filename = old_filename
+
+def run_lora_ga(args, clip_model, dataset, gpu_ids=[0], num_proc_per_gpu=None):
     set_global_seed(SEED)
     
     # 1. 资源初始化
@@ -657,8 +716,13 @@ def run_lora_ga(args, clip_model, dataset, gpu_ids=[0]):
         "mutation_scheduler": {
             "initial_std": INITIAL_STD_DEV,
             "final_std": FINAL_STD_DEV,
+            "initial_ratio": INITIAL_MUT_RATIO,
+            "final_ratio": FINAL_MUT_RATIO,
+            "initial_rate": INITIAL_MUT_RATE,
+            "final_rate": FINAL_MUT_RATE,
         },
     })
+    print(f"Starting GA for {NUM_GENERATIONS} generations...")
 
     best_val_acc = 0.0
     
@@ -671,7 +735,7 @@ def run_lora_ga(args, clip_model, dataset, gpu_ids=[0]):
         "min_samples": EARLY_STOP_MIN_SAMPLES,
         "tolerance": EARLY_STOP_TOLERANCE,
     }
-
+    
     # 3. 进化循环
     for gen in range(NUM_GENERATIONS):
         start_time = time.time()
@@ -682,7 +746,7 @@ def run_lora_ga(args, clip_model, dataset, gpu_ids=[0]):
             early_stop_cfg["target"] = best_known - EARLY_STOP_MARGIN
 
         # 并行评估
-        # num_eval = len([c for c in population if c.need_update])
+        num_eval = len([c for c in population if c.need_update])
         # print(f"Generation {gen}: Evaluating {num_eval} individuals...")
         
         update_fitness_parallel(population, gpu_ids, args, early_stop_cfg)
@@ -714,7 +778,6 @@ def run_lora_ga(args, clip_model, dataset, gpu_ids=[0]):
                     dataset.val_loader,
                     dataset.classnames
                 )
-                best_val_acc = max(best_val_acc, val_acc)
             except Exception:
                 pass # 如果 evaluate_lora 接口不匹配暂且跳过
 
@@ -734,24 +797,30 @@ def run_lora_ga(args, clip_model, dataset, gpu_ids=[0]):
         with open(log_file, "w") as f:
             json.dump(generation_log, f, indent=2)
             
-        # 繁殖下一代 (使用修正后的锦标赛选择)
+        # 繁殖下一代
         population, _ = reproduce(population, scheduler, gen)
 
     # 最终保存
     valid_population = [c for c in population if c.fitness is not None]
     if valid_population:  # 确保列表不为空
-        fits = [c.fitness for c in valid_population]
-        best_fitness = max(fits)
-        avg_fitness = sum(fits) / len(fits)
-        best_ind = max(valid_population, key=lambda c: c.fitness)
+        ranked = sorted(valid_population, key=lambda c: c.fitness, reverse=True)
+        best_ind = ranked[0]
+        final_mating_pool = ranked[:min(NUM_PARENTS, len(ranked))]
     else:
-        best_fitness = avg_fitness = None
+        ranked = []
         best_ind = None
+        final_mating_pool = []
+        
     res_main = _GPU_RESOURCES[gpu_ids[0]]
+    
     apply_genes_to_layers_fast(best_ind.genes, res_main['lora_layers'], best_ind.enabled_lora)
     if getattr(args, "save_path", None):
         print(f"[GA] Saving final LoRA weights to {args.save_path} ...")
         save_lora(args, res_main['lora_layers'])
+        
+    if final_mating_pool and getattr(args, "save_path", None):
+        print(f"[GA] Saving ALL mating pool individuals ({len(final_mating_pool)}) to {args.save_path} ...")
+        save_mating_pool_lora(args, res_main, final_mating_pool, prefix="mp_final")
 
     plot_ga_progress_from_log(generation_log, args)
     print("GA Finished.")

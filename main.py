@@ -9,7 +9,7 @@ from utils import *
 from run_utils import *
 from sgd import run_lora_sgd
 from adam import run_lora_adam
-from ga_bak_1212 import run_lora_ga
+from ga import run_lora_ga
 from sam import run_lora_sam
 from entropy_SGD import run_lora_entropy_sgd
 from loralib.utils import apply_lora, load_lora
@@ -24,7 +24,7 @@ def main():
     
     logit_scale = 100
 
-    shots_list = [64]
+    shots_list = [1,4,8,16]
     base_result_path = getattr(args, 'result_path', None)
     
     # # Zero-shot CLIP evaluation before training
@@ -99,6 +99,24 @@ def main():
         if args.eval_only:
             if args.shots == 0:
                 print("Evaluating zero-shot CLIP model.")
+                if 'objectnet' in args.eval_datasets:
+                    from datasets.objectnet import ObjectNet
+                    
+                    print("Evaluating on ObjectNet...")
+                    objectnet_ds = ObjectNet(root=args.root_path, preprocess=preprocess)
+
+                    acc1 = evaluate_objectnet(
+                        model=clip_model,
+                        data_loader=objectnet_ds.test_loader,
+                        device=target_device,
+                        objectnet_obj=objectnet_ds,
+                        result_path=args.result_path,
+                        opt="zs",
+                        seed=args.seed
+                    )
+                    
+                    print(f"Final ObjectNet Accuracy: {acc1}%")
+                    continue
                 evaluate(clip_model, "zs", dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
                 continue
             else:
@@ -108,6 +126,25 @@ def main():
                 target_device = torch.device(f"cuda:{args.gpu_ids[3]}") 
                 clip_model = clip_model.to(target_device)
                 clip_model.eval()
+                if 'objectnet' in args.eval_datasets:
+                    from datasets.objectnet import ObjectNet
+                    
+                    print("Evaluating on ObjectNet...")
+                    
+                    objectnet_ds = ObjectNet(root=args.root_path, preprocess=preprocess)
+                    
+                    acc1 = evaluate_objectnet(
+                        model=clip_model,
+                        data_loader=objectnet_ds.test_loader,
+                        device=target_device,
+                        objectnet_obj=objectnet_ds,
+                        result_path=args.result_path,
+                        opt=args.opt,
+                        seed=args.seed
+                    )
+                    
+                    print(f"Final ObjectNet Accuracy: {acc1}%")
+                    continue
                 evaluate(clip_model, args.opt, dataset, args.eval_datasets, args.result_path, args.seed, args.root_path)
                 continue
         
