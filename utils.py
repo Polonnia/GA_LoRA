@@ -184,19 +184,47 @@ def evaluate(clip_model, opt, dataset, eval_datasets, result_path, seed, root_pa
     print("**** ID accuracy: {:.2f}. ****\n".format(acc_test))
     exist.update({f'acc_test_seed{seed}': float(acc_test)})
 
-    tot_acc = 0
-    if len(eval_datasets) > 0:
+    normalized_eval_datasets = [v.strip() for v in eval_datasets if isinstance(v, str) and v.strip()]
+    for v in normalized_eval_datasets:
         try:
-            for v in eval_datasets:
-                print(f"Evaluating {v}...")
+            print(f"Evaluating {v}...")
+            if v == 'objectnet':
+                from datasets.objectnet import ObjectNet
+
+                preprocess = _build_clip_preprocess()
+                objectnet_ds = ObjectNet(root=root_path, preprocess=preprocess)
+                device = next(clip_model.parameters()).device
+                v_acc = evaluate_objectnet(
+                    model=clip_model,
+                    data_loader=objectnet_ds.test_loader,
+                    device=device,
+                    objectnet_obj=objectnet_ds,
+                    result_path=None,
+                    opt=None,
+                    seed=None
+                )
+            else:
                 v_acc = evaluate_imagenet_variant(clip_model, v, root_path)
-                tot_acc += v_acc
-                print(f"**** {v} accuracy: {v_acc:.2f}. ****")
-                
-                exist.update({f'acc_{v}_seed{seed}': float(v_acc)})
+
+            print(f"**** {v} accuracy: {v_acc:.2f}. ****")
+            exist.update({f'acc_{v}_seed{seed}': float(v_acc)})
         except Exception as e:
-            print(f"Warning: failed evaluating variants {eval_datasets}: {e}")
-    avg_acc = tot_acc / len(eval_datasets) if len(eval_datasets) > 0 else 0.0
+            print(f"Warning: failed evaluating variant {v}: {e}")
+
+    standard_variants = ['imagenet-a', 'imagenet-r', 'imagenet-sketch', 'imagenet-v2', 'objectnet']
+    variant_accs = []
+    for variant in standard_variants:
+        key = f'acc_{variant}_seed{seed}'
+        if key in exist:
+            variant_accs.append(exist[key])
+
+    if len(variant_accs) == 5:
+        avg_acc = sum(variant_accs) / 5
+    elif len(variant_accs) > 0:
+        avg_acc = sum(variant_accs) / len(variant_accs)
+    else:
+        avg_acc = 0.0
+
     exist.update({f'avg_acc_variants_seed{seed}': float(avg_acc)})
     # Save results
     with open(result_json_path, 'w') as f:

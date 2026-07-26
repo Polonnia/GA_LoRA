@@ -1,77 +1,129 @@
+import time
 import torch
 import torch.nn.functional as F
 import numpy as np
-from tqdm import tqdm
-import time
 
 from utils import *
-
 from loralib.utils import mark_only_lora_as_trainable, apply_lora, get_lora_parameters, save_lora
 
 
-class SAM(torch.optim.Optimizer):
+class FocalSAM(torch.optim.Optimizer):
+    """
+    Focal Sharpness-Aware Minimization (Focal-SAM) Optimizer
+    
+    Assigns different penalties to class-wise sharpness, achieving fine-grained 
+    control without extra backpropagations, while maintaining efficiency.
+    
+    Paper: "Focal-SAM: Focal Sharpness-Aware Minimization for Long-Tailed Classification"
+    """
+    
     def __init__(self, params, base_optimizer, rho=0.05, adaptive=False, **kwargs):
         assert rho >= 0.0, f"Invalid rho, should be non-negative: {rho}"
 
         defaults = dict(rho=rho, adaptive=adaptive, **kwargs)
-        super(SAM, self).__init__(params, defaults)
+        super(FocalSAM, self).__init__(params, defaults)
 
         self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
         self.param_groups = self.base_optimizer.param_groups
-        self.defaults.update(self.base_optimizer.defaults)
 
     @torch.no_grad()
     def first_step(self, zero_grad=False):
+        """
+        First step: Store gradients and compute perturbation direction
+        """
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                
+                self.state[p]["grad"] = p.grad.clone()
+
+        if zero_grad:
+            self.zero_grad()
+
+    @torch.no_grad()
+    def second_step(self, zero_grad=False):
+        """
+        Second step: Apply perturbation to reach the local maximum
+        """
         grad_norm = self._grad_norm()
+
         for group in self.param_groups:
             scale = group["rho"] / (grad_norm + 1e-12)
 
             for p in group["params"]:
-                if p.grad is None: continue
+                if p.grad is None:
+                    continue
                 self.state[p]["old_p"] = p.data.clone()
                 e_w = (torch.pow(p, 2) if group["adaptive"] else 1.0) * p.grad * scale.to(p)
-                p.add_(e_w)  # climb to the local maximum "w + e(w)"
+                p.add_(e_w)
 
-        if zero_grad: self.zero_grad()
+        if zero_grad:
+            self.zero_grad()
 
     @torch.no_grad()
-    def second_step(self, zero_grad=False):
+    def third_step(self, zero_grad=False):
+        """
+        Third step: Restore original weights and apply the base optimizer
+        """
         for group in self.param_groups:
             for p in group["params"]:
-                if p.grad is None: continue
-                p.data = self.state[p]["old_p"]  # get back to "w" from "w + e(w)"
+                if p.grad is None:
+                    continue     
+                
+                p.data = self.state[p]["old_p"]
+                p.grad.add_(self.state[p]["grad"])
 
-        self.base_optimizer.step()  # do the actual "sharpness-aware" update
-
-        if zero_grad: self.zero_grad()
+        self.base_optimizer.step()
+        
+        if zero_grad:
+            self.zero_grad()
 
     @torch.no_grad()
     def step(self, closure=None):
-        assert closure is not None, "Sharpness Aware Minimization requires closure, but it was not provided"
-        closure = torch.enable_grad()(closure)  # the closure should do a full forward-backward pass
+        """
+        Single step with closure (for compatibility)
+        """
+        assert closure is not None, "FocalSAM requires closure"
+        closure = torch.enable_grad()(closure)
 
         self.first_step(zero_grad=True)
         closure()
-        self.second_step()
+        self.second_step(zero_grad=True)
+        closure()
+        self.third_step(zero_grad=True)
 
     def _grad_norm(self):
-        shared_device = self.param_groups[0]["params"][0].device  # put everything on the same device, in case of model parallelism
+        """
+        Calculate gradient norm
+        """
+        shared_device = self.param_groups[0]["params"][0].device
         norm = torch.norm(
-                    torch.stack([
-                        ((torch.abs(p) if group["adaptive"] else 1.0) * p.grad).norm(p=2).to(shared_device)
-                        for group in self.param_groups for p in group["params"]
-                        if p.grad is not None
-                    ]),
-                    p=2
-               )
+            torch.stack([
+                ((torch.abs(p) if group["adaptive"] else 1.0) * p.grad).norm(p=2).to(shared_device)
+                for group in self.param_groups for p in group["params"]
+                if p.grad is not None
+            ]),
+            p=2
+        )
         return norm
 
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
         self.base_optimizer.param_groups = self.param_groups
-        
-def run_lora_sam(args, clip_model, logit_scale, dataset, device_id):
 
+
+def run_lora_focal_sam(args, clip_model, logit_scale, dataset, device_id):
+    """
+    Train CLIP model with LoRA using Focal-SAM optimizer
+    
+    Args:
+        args: Configuration arguments
+        clip_model: CLIP model to train
+        logit_scale: Temperature scale for logits
+        dataset: Training/validation dataset
+        device_id: GPU device ID
+    """
     VALIDATION = True
 
     import clip
@@ -84,9 +136,9 @@ def run_lora_sam(args, clip_model, logit_scale, dataset, device_id):
     mark_only_lora_as_trainable(clip_model)
     total_iters = args.n_iters * args.shots
 
-    # ========= SAM + SGD =========
+    # ========= Focal-SAM + AdamW =========
     base_optimizer = torch.optim.AdamW
-    optimizer = SAM(
+    optimizer = FocalSAM(
         get_lora_parameters(clip_model),
         base_optimizer,
         rho=float(getattr(args, "rho", 0.05)),
@@ -147,7 +199,7 @@ def run_lora_sam(args, clip_model, logit_scale, dataset, device_id):
                 text_features = text_features_static
 
             # -------------------------
-            # 1st forward-backward
+            # 1st forward-backward (compute loss and gradients)
             # -------------------------
             optimizer.zero_grad(set_to_none=True)
 
@@ -173,7 +225,7 @@ def run_lora_sam(args, clip_model, logit_scale, dataset, device_id):
             optimizer.first_step(zero_grad=True)
 
             # -------------------------
-            # 2nd forward-backward (at w+e(w))
+            # 2nd forward-backward (at w+e(w), SAM step)
             # -------------------------
             with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
                 image_embeddings2 = clip_model.encode_image(images)
@@ -189,6 +241,24 @@ def run_lora_sam(args, clip_model, logit_scale, dataset, device_id):
 
             loss2.backward()
             optimizer.second_step(zero_grad=True)
+
+            # -------------------------
+            # 3rd forward-backward (final update)
+            # -------------------------
+            with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+                image_embeddings3 = clip_model.encode_image(images)
+                image_features3 = image_embeddings3 / image_embeddings3.norm(dim=-1, keepdim=True)
+
+                tf3 = text_features.to(device=image_features3.device, dtype=image_features3.dtype)
+                ls3 = logit_scale
+                if isinstance(ls3, torch.Tensor):
+                    ls3 = ls3.to(device=image_features3.device, dtype=image_features3.dtype)
+
+                logits3 = ls3 * (image_features3 @ tf3.t())
+                loss3 = F.cross_entropy(logits3.float(), target)
+
+            loss3.backward()
+            optimizer.third_step(zero_grad=True)
             scheduler.step()
 
             count_iters += 1
@@ -229,7 +299,8 @@ def run_lora_sam(args, clip_model, logit_scale, dataset, device_id):
             break
 
     end_time = time.time()
-    print(f"SAM training completed in {(end_time - start_time)/60:.2f} minutes.")
+    print(f"Focal-SAM training completed in {(end_time - start_time)/60:.2f} minutes.")
+    
     # ===== plot 不能丢 =====
     plot_training_curves(
         args,

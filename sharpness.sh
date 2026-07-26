@@ -16,15 +16,15 @@ for i in "${!GPUS[@]}"; do
     GPU_ID=${GPUS[$i]}
     OPT=${OPTS[$i]}
     
-    echo "Starting task: Optimizer = $OPT, GPU = $GPU_ID, Shots = 4"
+    echo "Starting task: Optimizer = $OPT, GPU = $GPU_ID, Shots = 1"
     
     # 核心 nohup 命令
     # --gpu_ids $GPU_ID: 这里传入单个数字，脚本解析列表时取第一个即为此ID
     nohup python eval_sharpness.py \
         --opt "$OPT" \
-        --shots 4 \
+        --shots 1 \
         --gpu_ids "$GPU_ID" \
-        > "logs/${OPT}_4shot_sharpness.log" 2>&1 &
+        > "logs/${OPT}_1shot_sharpness.log" 2>&1 &
 done
 
 echo "All 5 tasks submitted successfully!"
