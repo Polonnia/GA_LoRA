@@ -1,7 +1,7 @@
-# GPT-2-small ID/OOD experiment for GA-LoRA
+# GPT-2 Small/Large ID/OOD experiment for GA-LoRA
 
-This add-on performs a lightweight language-only transfer experiment without fine-tuning a large LLM.
-It adapts **GPT-2 small** on few-shot SST-2 sentiment classification and evaluates:
+This add-on adapts **GPT-2 Small** or **GPT-2 Large (774M)** on few-shot SST-2 sentiment
+classification and evaluates:
 
 - **ID:** SST-2 validation
 - **OOD:** IMDb, Yelp Polarity, and Amazon Polarity
@@ -30,7 +30,23 @@ pip install -r requirements_gpt2.txt
 
 The datasets and GPT-2 checkpoint are downloaded from Hugging Face on first use.
 
-## 3. Quick smoke test
+## 3. Original pretrained model evaluation
+
+This path loads the pretrained causal LM directly and does not create or load a LoRA adapter:
+
+```bash
+python -m gpt2_lora.train_eval \
+  --optimizer original \
+  --mode eval \
+  --model_name openai-community/gpt2-large \
+  --device cuda:0 \
+  --eval_batch_size 4 \
+  --output_dir outputs/gpt2_large_sst2/original/seed1
+```
+
+`zero_shot` remains available as a backwards-compatible alias for `original`.
+
+## 4. Quick smoke test
 
 ```bash
 python -m gpt2_lora.train_eval \
@@ -44,7 +60,7 @@ python -m gpt2_lora.train_eval \
   --output_dir outputs/gpt2_smoke
 ```
 
-## 4. Main GA-LoRA experiment
+## 5. Main GA-LoRA experiment
 
 ```bash
 python -m gpt2_lora.train_eval \
@@ -67,7 +83,7 @@ python -m gpt2_lora.train_eval \
   --output_dir outputs/gpt2_sst2/ga/seed1
 ```
 
-## 5. Adam baseline
+## 6. Adam baseline
 
 ```bash
 python -m gpt2_lora.train_eval \
@@ -83,9 +99,24 @@ python -m gpt2_lora.train_eval \
   --output_dir outputs/gpt2_sst2/adam/seed1
 ```
 
-Run `bash gpt2_lora/run_gpt2.sh` for zero-shot, Adam, and GA over three seeds.
+Run `bash gpt2_lora/run_gpt2.sh` for original-model evaluation, Adam, and GA over three
+seeds using GPT-2 Small.
 
-## 6. Outputs
+For GPT-2 Large, run:
+
+```bash
+bash gpt2_lora/run_gpt2_large.sh
+```
+
+The Large launcher selects `openai-community/gpt2-large` and uses conservative defaults of
+`eval_batch_size=4` and `train_batch_size=2`. Override them according to available GPU memory:
+
+```bash
+GPU=0 SEEDS="1 2 3" EVAL_BATCH_SIZE=8 TRAIN_BATCH_SIZE=4 \
+  bash gpt2_lora/run_gpt2_large.sh
+```
+
+## 7. Outputs
 
 Each run writes:
 
@@ -99,7 +130,8 @@ Each run writes:
 
 ## Important reporting notes
 
-1. Report this as a **GPT-2-small language-model experiment**, not as evidence on modern large LLMs.
+1. Report the exact checkpoint (**GPT-2 Small** or **GPT-2 Large, 774M**); GPT-2 Large is
+   larger than GPT-2 Small but is not a modern instruction-tuned LLM.
 2. Keep the same sampled SST-2 examples for all optimizers by using the same seed.
 3. Report three seeds and include wall-clock time or forward-pass count.
 4. `max_eval_samples=2000` is the default for fast rebuttal experiments. Use `-1` for complete

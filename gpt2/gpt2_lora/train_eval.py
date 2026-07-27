@@ -27,10 +27,15 @@ from .modeling import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="GPT-2-small LoRA training with GA/Adam and ID/OOD sentiment evaluation."
+        description="GPT-2 LoRA training with GA/Adam and ID/OOD sentiment evaluation."
     )
     parser.add_argument("--mode", choices=("train", "eval", "train_eval"), default="train_eval")
-    parser.add_argument("--optimizer", choices=("ga", "adam", "zero_shot"), default="ga")
+    parser.add_argument(
+        "--optimizer",
+        choices=("ga", "adam", "original", "zero_shot"),
+        default="ga",
+        help="'original' evaluates the untouched pretrained model; 'zero_shot' is a legacy alias.",
+    )
     parser.add_argument("--model_name", default="openai-community/gpt2")
     parser.add_argument("--output_dir", default="outputs/gpt2_sst2/ga/seed1")
     parser.add_argument("--adapter_path", default=None)
@@ -196,20 +201,30 @@ def main() -> None:
         json.dump(vars(args), file, indent=2)
 
     device = torch.device(args.device)
+    is_original = args.optimizer in ("original", "zero_shot")
+    if is_original and args.mode != "eval":
+        raise ValueError("--optimizer original/zero_shot only supports --mode eval.")
+    if is_original and (args.adapter_path or args.chromosome_path):
+        raise ValueError("Original-model evaluation cannot load an adapter or chromosome.")
     target_modules = [item.strip() for item in args.target_modules.split(",") if item.strip()]
     model, tokenizer, dtype = build_model_and_tokenizer(
         model_name=args.model_name,
         device=device,
         dtype_name=args.dtype,
+        use_lora=not is_original,
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
         lora_layers=args.lora_layers,
         target_modules=target_modules,
     )
-    trainable = trainable_parameter_dict(model)
-    print(f"Trainable LoRA tensors: {len(trainable)}")
-    print(f"Trainable LoRA parameters: {sum(p.numel() for p in trainable.values()):,}")
+    trainable = {}
+    if is_original:
+        print("Evaluating the original pretrained model without LoRA adapters.")
+    else:
+        trainable = trainable_parameter_dict(model)
+        print(f"Trainable LoRA tensors: {len(trainable)}")
+        print(f"Trainable LoRA parameters: {sum(p.numel() for p in trainable.values()):,}")
 
     if args.adapter_path:
         load_adapter_if_requested(model, args.adapter_path)
@@ -219,7 +234,7 @@ def main() -> None:
     train_loader = None
     training_seconds = 0.0
     evaluation_seconds = 0.0
-    if args.mode in ("train", "train_eval") and args.optimizer != "zero_shot":
+    if args.mode in ("train", "train_eval") and not is_original:
         training_start = time.time()
         train_loader = build_train_loader(
             tokenizer=tokenizer,

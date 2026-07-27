@@ -85,6 +85,7 @@ def build_model_and_tokenizer(
     model_name: str,
     device: torch.device,
     dtype_name: str,
+    use_lora: bool,
     lora_rank: int,
     lora_alpha: int,
     lora_dropout: float,
@@ -99,6 +100,12 @@ def build_model_and_tokenizer(
     base_model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype)
     base_model.config.pad_token_id = tokenizer.pad_token_id
     base_model.config.use_cache = False
+
+    label_ids = verbalizer_token_ids(tokenizer)
+    if not use_lora:
+        base_model.requires_grad_(False)
+        model = GPT2VerbalizerClassifier(base_model, label_ids).to(device)
+        return model, tokenizer, dtype
 
     num_hidden_layers = int(base_model.config.n_layer)
     if lora_layers <= 0 or lora_layers > num_hidden_layers:
@@ -122,7 +129,6 @@ def build_model_and_tokenizer(
         bias="none",
     )
     peft_model = get_peft_model(base_model, peft_config)
-    label_ids = verbalizer_token_ids(tokenizer)
     model = GPT2VerbalizerClassifier(peft_model, label_ids).to(device)
     return model, tokenizer, dtype
 

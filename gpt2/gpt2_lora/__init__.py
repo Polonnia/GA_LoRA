@@ -1,1 +1,1 @@
-"""GPT-2-small GA-LoRA sentiment transfer experiments."""
+"""GPT-2 GA-LoRA sentiment transfer experiments."""
