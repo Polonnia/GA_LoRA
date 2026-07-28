@@ -1,12 +1,50 @@
 from __future__ import annotations
 
+import importlib
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
-from datasets import Dataset, load_dataset
 from torch.utils.data import DataLoader, Dataset as TorchDataset
 from transformers import PreTrainedTokenizerBase
+
+
+def _import_huggingface_datasets():
+    """Import Hugging Face datasets instead of the repository's datasets package."""
+    repository_root = Path(__file__).resolve().parents[2]
+    local_datasets_dir = repository_root / "datasets"
+
+    loaded = sys.modules.get("datasets")
+    loaded_file = getattr(loaded, "__file__", None)
+    if loaded_file and Path(loaded_file).resolve().is_relative_to(local_datasets_dir):
+        for module_name in list(sys.modules):
+            if module_name == "datasets" or module_name.startswith("datasets."):
+                del sys.modules[module_name]
+
+    original_path = sys.path[:]
+    try:
+        sys.path[:] = [
+            entry
+            for entry in sys.path
+            if Path(entry or ".").resolve() != repository_root
+        ]
+        module = importlib.import_module("datasets")
+    finally:
+        sys.path[:] = original_path
+
+    if not hasattr(module, "Dataset") or not hasattr(module, "load_dataset"):
+        module_file = getattr(module, "__file__", "<unknown>")
+        raise ImportError(
+            "Could not import the Hugging Face 'datasets' package; imported "
+            f"{module_file!s} instead. Install requirements_gpt2.txt in the active "
+            "environment and remove repository-root entries from PYTHONPATH."
+        )
+    return module.Dataset, module.load_dataset
+
+
+Dataset, load_dataset = _import_huggingface_datasets()
 
 
 @dataclass(frozen=True)

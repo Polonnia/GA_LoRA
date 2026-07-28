@@ -30,6 +30,10 @@ pip install -r requirements_gpt2.txt
 
 The datasets and GPT-2 checkpoint are downloaded from Hugging Face on first use.
 
+The repository also contains a local package named `datasets`. The GPT-2 data loader explicitly
+imports the Hugging Face package, so running from the repository root or having the root on
+`PYTHONPATH` will not shadow the dependency.
+
 ## 3. Original pretrained model evaluation
 
 This path loads the pretrained causal LM directly and does not create or load a LoRA adapter:
